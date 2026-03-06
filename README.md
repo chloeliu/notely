@@ -5,7 +5,7 @@
  ██║╚██╗██║██║   ██║   ██║   ██╔══╝  ██║    ╚██╔╝
  ██║ ╚████║╚██████╔╝   ██║   ███████╗███████╗██║
  ╚═╝  ╚═══╝ ╚═════╝    ╚═╝   ╚══════╝╚══════╝╚═╝
- The filing system AI agents can actually use.
+ A notes system that works for you and your AI.
 ```
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
