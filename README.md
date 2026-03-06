@@ -8,6 +8,7 @@
  A notes system that works for you and your AI.
 ```
 
+[![PyPI](https://img.shields.io/pypi/v/notely)](https://pypi.org/project/notely/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen.svg)](tests/)
