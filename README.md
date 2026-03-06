@@ -51,6 +51,29 @@ notely open
 
 That's it. `notely open` gives you an interactive session. Paste anything. The AI structures it and saves it as a clean markdown file.
 
+### Setting up your workspace
+
+`notely init` is an interactive wizard that designs your filing system. Tell it what you do, and the AI creates a folder structure that fits:
+
+```
+notely init
+
+  What kind of notes will you be taking?
+  > I manage 3 client accounts and have personal stuff too
+
+  Creating workspace...
+
+  my-notes/
+  ├── config.toml
+  └── notes/
+      ├── clients/
+      │   ├── acme/
+      │   └── globex/
+      └── personal/
+```
+
+You can always add folders later with `/mkdir` or let the AI route notes to new folders as they come in.
+
 ## What It Looks Like
 
 ### Capturing notes
@@ -120,17 +143,17 @@ notely-chat (Acme)> what are the open items for Acme?
 
 ```mermaid
 flowchart TD
-    A["You paste raw text"] --> B{"AI classifies it"}
-    B -->|"Structured content"| C["Full note<br/>(title, summary, tags, action items)"]
-    B -->|"Quick task or idea"| D["Todo / Idea<br/>(one-liner, optional due date)"]
+    A["You paste raw text"] --> B{"AI classifies it<br/>and files it"}
+    B -->|"Structured content"| C["Full note<br/>(title, summary, tags,<br/>action items)"]
+    B -->|"Quick task or idea"| D["Todo or Idea<br/>(one-liner, due date)"]
     B -->|"Reference data"| E["Snippet<br/>(account number, NPI, URL)"]
     C --> F{"Duplicate?"}
-    F -->|"Match found"| G["Merge into existing note"]
+    F -->|"Match found"| G["Merge into<br/>existing note"]
     F -->|"No match"| H["Route to folder"]
     G --> I["Saved as Markdown"]
     H --> I
-    D --> J["Saved to index"]
-    E --> J
+    D --> I
+    E --> J["Saved to index"]
     I --> K["Indexed + searchable"]
     J --> K
 
@@ -138,7 +161,7 @@ flowchart TD
     style I fill:#d4edda,stroke:#28a745,stroke-width:2px
 ```
 
-The AI decides what your input is — you don't have to. Meeting notes become structured notes with action items. "Call dentist Friday" becomes a todo. An account number becomes a searchable reference snippet.
+The AI decides what your input is and files it in the right place — you never have to. Meeting notes become structured notes with action items, filed into the right client folder. "Call dentist Friday" becomes a todo. An account number becomes a searchable reference snippet. Duplicates are caught automatically before anything is saved.
 
 **Markdown files are the source of truth.** Everything else (search index, vectors, CSV exports) is derived and can be rebuilt with `notely reindex`. You can edit your notes by hand in any text editor — notely respects your changes.
 
