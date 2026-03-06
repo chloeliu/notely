@@ -39,24 +39,30 @@ Notely handles the rest: duplicate detection (won't save the same paste twice), 
 ```bash
 pip install notely
 
+# Verify it installed
+notely --help
+
+# Pick any folder — this is where your notes will live
+mkdir my-notes && cd my-notes
+
 # Set up your Anthropic API key
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
 
-# Interactive setup — creates your workspace
+# Tell notely what you do — it designs a filing system for you
 notely init
 
 # Start capturing
 notely open
 ```
 
-That's it. `notely open` gives you an interactive session. Paste anything. The AI structures it and saves it as a clean markdown file.
+> **`notely` command not found?** Try `python -m notely --help`. If that works, your Python scripts directory isn't in your PATH. Run `pip show notely` to find where it's installed.
 
-### Setting up your workspace
+### What `notely init` does
 
-`notely init` is an interactive wizard that designs your filing system. Tell it what you do, and the AI creates a folder structure that fits:
+`notely init` is an interactive wizard. You describe your work, and the AI creates a folder structure that fits:
 
 ```
-notely init
+$ notely init
 
   What kind of notes will you be taking?
   > I manage 3 client accounts and have personal stuff too
@@ -72,7 +78,9 @@ notely init
       └── personal/
 ```
 
-You can always add folders later with `/mkdir` or let the AI route notes to new folders as they come in.
+You can always add folders later with `/mkdir` inside `notely open`, or let the AI create new folders automatically as your notes come in.
+
+After init, run `notely open` to start an interactive session. Paste anything — meeting notes, Slack threads, quick thoughts. The AI structures it and files it in the right folder as a clean markdown file.
 
 ## What It Looks Like
 
