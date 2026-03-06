@@ -45,15 +45,14 @@ notely --help
 # Pick any folder — this is where your notes will live
 mkdir my-notes && cd my-notes
 
-# Set up your Anthropic API key
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
-
-# Tell notely what you do — it designs a filing system for you
+# Interactive setup — asks for your API key and designs your filing system
 notely init
 
 # Start capturing
 notely open
 ```
+
+Notely uses the Anthropic API (Claude) to structure your notes. `notely init` will ask for your API key if you don't have one — get it at [console.anthropic.com](https://console.anthropic.com/).
 
 > **`notely` command not found?** Try `python -m notely --help`. If that works, your Python scripts directory isn't in your PATH. Run `pip show notely` to find where it's installed.
 
@@ -267,6 +266,8 @@ Saved note:  Login: admin  Password: s3cret_pass
 **Folder routing** — AI figures out where each note belongs based on your workspace structure. You can override, but usually don't need to.
 
 **Action item extraction** — AI pulls out tasks, assigns owners, parses due dates. View them all with `/todo`.
+
+**Web clipping** — `/clip <url>` saves any web page as a structured note. Requires the optional Firecrawl dependency (`pip install "notely[web]"`) and a [Firecrawl API key](https://firecrawl.dev).
 
 **File attachments** — Drag or paste file paths. Supports text, PDF (with table extraction), and images (described via Vision API).
 
