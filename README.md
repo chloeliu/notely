@@ -11,7 +11,7 @@
 [![PyPI](https://img.shields.io/pypi/v/notely)](https://pypi.org/project/notely/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen.svg)](tests/)
+[![Tests](https://github.com/chloeliu/notely/actions/workflows/test.yml/badge.svg)](https://github.com/chloeliu/notely/actions/workflows/test.yml)
 
 Paste your meeting notes, Slack threads, or quick thoughts. AI organizes them into searchable markdown files. You never have to sort, tag, or file anything yourself.
 
@@ -247,6 +247,7 @@ Both paths produce the same markdown files and search index.
 | `/timer <folder> <desc>` | Time tracking |
 | `/clip <url>` | Save a web page as a note |
 | `/ref` | View/search reference data (account numbers, NPIs, etc.) |
+| `/secret` | View stored secrets (`/secret service key` to reveal a value) |
 | `/folder <name>` | Set a working folder for the session |
 | `/edit <id>` | Edit a note in your editor |
 
@@ -256,13 +257,15 @@ Both paths produce the same markdown files and search index.
 
 **Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge the new information in.
 
-**Secret masking** — Wrap sensitive data in `|||secret|||` markers. Before any text is sent to the AI, those values are replaced with `[REDACTED]`. The actual values are stored locally in `.secrets.toml` (gitignored) and restored in the saved note. Your API keys, passwords, and credentials never leave your machine.
+**Secret masking** — Wrap sensitive data in `|||secret|||` markers. The values are replaced with `[REDACTED]` before any text is sent to the AI. If the AI classifies the input as reference data (account number, API token), it's saved to `.secrets.toml` with proper naming — not as a visible snippet. Your secrets never leave your machine.
 
 ```
-You paste:   Login: admin  Password: |||s3cret_pass|||
-AI sees:     Login: admin  Password: [REDACTED]
-Saved note:  Login: admin  Password: s3cret_pass
+You paste:   pypi token |||pypi-AgEIcHl...|||
+AI sees:     pypi token [REDACTED]
+Saved to:    .secrets.toml → [pypi] api_token = "pypi-AgEIcHl..."
 ```
+
+Retrieve secrets with `/secret` inside `notely open` — tab-completes service and key names, only shows values when you specify both.
 
 **Folder routing** — AI figures out where each note belongs based on your workspace structure. At any routing prompt, you can type a folder path directly (e.g. `clients/acme`) instead of picking a number — notely resolves it or creates the folder on the spot.
 

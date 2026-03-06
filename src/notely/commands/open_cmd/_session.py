@@ -51,6 +51,7 @@ HELP_TEXT = """
   [cyan]/ideas[/cyan] [dim]\\[FOLDER][/dim]              Ideas pipeline
   [cyan]/timer[/cyan]           Time tracking ([cyan]/timer start[/cyan], [cyan]stop[/cyan], [cyan]add[/cyan], [cyan]log[/cyan])
   [cyan]/ref[/cyan]             References ([cyan]/ref entity key value[/cyan] to add)
+  [cyan]/secret[/cyan]          Secrets ([cyan]/secret service key[/cyan] to view)
 
 [bold]Workspace:[/bold]
   [cyan]/spaces[/cyan]          Show spaces overview
@@ -246,6 +247,8 @@ def open_cmd(ctx: click.Context) -> None:
                 _handle_inbox(config, arg, working_folder, completer)
             elif cmd == "/ref":
                 _show_references(config, arg)
+            elif cmd == "/secret":
+                _show_secrets(config, arg)
             elif cmd == "/agent":
                 _agent_dispatch(config, arg, working_folder)
             elif cmd == "/edit":
@@ -278,7 +281,7 @@ from ._input import _read_block, _process_input, _clip_url
 from ._handlers import (
     _handle_todo, _show_ideas,
     _show_list, _show_search, _show_spaces, _timer_dispatch,
-    _show_references, _handle_workflow,
+    _show_references, _show_secrets, _handle_workflow,
     _mkdir, _rmdir, _delete_note, _edit_note_inline,
 )
 from ._inbox import _handle_inbox

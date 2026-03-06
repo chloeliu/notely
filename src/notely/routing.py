@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 
 from .config import NotelyConfig
 from .db import Database
+from .prompts import duplicate_found, pick_from_list
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -127,7 +128,6 @@ def route_input(
         RoutingDecision with space, group, optional subgroup, and optional
         append_to_note (note ID if updating). Returns None if user skips/cancels.
     """
-    from rich.prompt import Confirm
 
     hints = hints or {}
 
@@ -140,30 +140,24 @@ def route_input(
     # Layer 1: Exact match (full content hash)
     dup = db.find_exact_duplicate(hash_text)
     if dup:
-        console.print(
-            f"\n[dim]Exact match:[/dim] "
-            f"'{dup['title']}' ({dup['date']})"
-        )
-        choice = Prompt.ask("[U]pdate / [N]ew note / [S]kip", default="", show_default=False)
-        result = _handle_dup_choice(choice, dup, config, db)
-        if result is not None:
-            return result
-        if choice.lower() in ("s", ""):
+        dup_choice = duplicate_found(dup["title"], dup["date"], "exact", console=console)
+        if dup_choice == "update":
+            result = _handle_dup_choice("u", dup, config, db)
+            if result is not None:
+                return result
+        elif dup_choice == "skip":
             return None
 
     # Layer 2: Snippet match (first 300 chars — same content with edits)
     if not dup:
         snippet_match = db.find_snippet_match(hash_text)
         if snippet_match:
-            console.print(
-                f"\n[dim]This looks like:[/dim] "
-                f"'{snippet_match['title']}' ({snippet_match['date']})"
-            )
-            choice = Prompt.ask("[U]pdate / [N]ew note / [S]kip", default="", show_default=False)
-            result = _handle_dup_choice(choice, snippet_match, config, db)
-            if result is not None:
-                return result
-            if choice.lower() in ("s", ""):
+            dup_choice = duplicate_found(snippet_match["title"], snippet_match["date"], "near", console=console)
+            if dup_choice == "update":
+                result = _handle_dup_choice("u", snippet_match, config, db)
+                if result is not None:
+                    return result
+            elif dup_choice == "skip":
                 return None
 
     # If hints fully specify routing, use them directly
@@ -280,8 +274,6 @@ def present_matches(
 
     Returns None if user cancels.
     """
-    from rich.prompt import Confirm
-
     # --- Gather close note matches ---
     close_notes: list[dict[str, Any]] = []
     nearby_notes: list[dict[str, Any]] = []  # Between GOOD_MATCH and WEAK_MATCH
@@ -313,11 +305,8 @@ def present_matches(
     # ── Flow 1: Super close note match → likely duplicate ──
     if close_notes and close_notes[0].get("_distance", 1) < DIST_DUPLICATE:
         best = close_notes[0]
-        console.print(
-            f"\n[yellow]You may already have this:[/yellow] "
-            f"'{best['title']}' ({best['date']})"
-        )
-        if Confirm.ask("Update that note?", default=True):
+        dup_choice = duplicate_found(best["title"], best["date"], "similar", console=console)
+        if dup_choice == "update":
             return RoutingDecision(
                 space=best["space"],
                 group_slug=best["group_slug"],
@@ -325,104 +314,101 @@ def present_matches(
                 subgroup_slug=best.get("subgroup_slug"),
                 append_to_note=best["note_id"],
             )
-        # User said no — continue to directory matching below
+        if dup_choice == "skip":
+            return None
+        # User chose "new" — continue to directory matching below
 
     # ── Flow 2: Close notes → offer update choices ──
     if close_notes:
         console.print("\n[bold]Update an existing note?[/bold]")
         show_notes = close_notes[:3]
-        for i, nm in enumerate(show_notes, 1):
-            console.print(
-                f"  [{i}] [cyan]'{nm['title']}' ({nm['date']})[/cyan]"
-            )
+        items = [
+            (str(i), f"[cyan]'{nm['title']}' ({nm['date']})[/cyan]")
+            for i, nm in enumerate(show_notes, 1)
+        ]
         n = len(show_notes)
-        console.print(f"  [{n + 1}] New note")
-        console.print(f"  [{n + 2}] Somewhere else")
-        console.print(f"  [{n + 3}] Skip")
-        console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
+        extras = [("n", "New note"), ("e", "Somewhere else"), ("s", "Skip")]
 
-        choice = Prompt.ask("Choice", default=str(n + 1))
+        choice = pick_from_list(
+            items, extras=extras, default="n",
+            allow_text=True, console=console,
+        )
+
+        if choice is None or choice == "s":
+            return None
+        if choice == "e":
+            return _prompt_folder_with_autocomplete(config)
         try:
             idx = int(choice) - 1
+            if 0 <= idx < n:
+                picked = show_notes[idx]
+                return RoutingDecision(
+                    space=picked["space"],
+                    group_slug=picked["group_slug"],
+                    group_display=picked.get("group_slug", "").replace("-", " ").title(),
+                    subgroup_slug=picked.get("subgroup_slug"),
+                    append_to_note=picked["note_id"],
+                )
         except ValueError:
-            # Not a number — try to resolve as folder path
+            # Free text — try to resolve as folder path
             resolved = _resolve_folder_text(config, choice, ask_space=False)
             if resolved:
                 return resolved
             return _prompt_folder_with_autocomplete(config)
-
-        if idx == n + 2:
-            return None  # skip
-        if idx == n + 1:
-            return _prompt_folder_with_autocomplete(config)
-        if 0 <= idx < n:
-            picked = show_notes[idx]
-            return RoutingDecision(
-                space=picked["space"],
-                group_slug=picked["group_slug"],
-                group_display=picked.get("group_slug", "").replace("-", " ").title(),
-                subgroup_slug=picked.get("subgroup_slug"),
-                append_to_note=picked["note_id"],
-            )
         # User chose "new note" — fall through to directory selection
 
     # ── Flow 3: Good directory match → compact top-3 confirm ──
     if dirs and dirs[0].get("_distance", 1) < DIST_GOOD_MATCH:
         top_dirs = dirs[:3]
         console.print("\n[bold]New note — which folder?[/bold]")
-        for i, d in enumerate(top_dirs, 1):
-            console.print(f"  [{i}] {d['display_name']}")
-        n = len(top_dirs)
-        console.print(f"  [{n + 1}] Somewhere else")
-        console.print(f"  [{n + 2}] Skip")
-        console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
+        items = [
+            (str(i), d["display_name"])
+            for i, d in enumerate(top_dirs, 1)
+        ]
+        extras = [("e", "Somewhere else"), ("s", "Skip")]
 
-        choice = Prompt.ask("Choice (default 1)", default="1")
+        choice = pick_from_list(
+            items, extras=extras, default="1",
+            allow_text=True, console=console,
+        )
+
+        if choice is None or choice == "s":
+            return None
+        if choice == "e":
+            return _prompt_folder_with_autocomplete(config)
         try:
             idx = int(choice) - 1
+            if 0 <= idx < len(top_dirs):
+                picked_dir = top_dirs[idx]
+                if not picked_dir.get("group_slug"):
+                    return ask_routing_manually(config, hints={"space": picked_dir["space"]})
+                return RoutingDecision(
+                    space=picked_dir["space"],
+                    group_slug=picked_dir["group_slug"],
+                    group_display=picked_dir["display_name"],
+                    subgroup_slug=picked_dir.get("subgroup_slug"),
+                )
         except ValueError:
-            # Not a number — try to resolve as folder path
             resolved = _resolve_folder_text(config, choice, ask_space=False)
             if resolved:
                 return resolved
             return _prompt_folder_with_autocomplete(config)
-
-        if idx == n + 1:
-            return None  # skip
-        if idx == n:
-            return _prompt_folder_with_autocomplete(config)
-        if idx < 0 or idx > n:
-            return None
-
-        picked_dir = top_dirs[idx]
-        # Space-level match (no group yet)
-        if not picked_dir.get("group_slug"):
-            return ask_routing_manually(config, hints={"space": picked_dir["space"]})
-
-        return RoutingDecision(
-            space=picked_dir["space"],
-            group_slug=picked_dir["group_slug"],
-            group_display=picked_dir["display_name"],
-            subgroup_slug=picked_dir.get("subgroup_slug"),
-        )
+        return None
 
     # ── Flow 4: Weak matches — dirs + nearby notes ──
     if not dirs and not nearby_notes:
         return _prompt_folder_with_autocomplete(config)
 
     console.print("\n[bold]Where should this go?[/bold]")
-    idx_map: dict[int, tuple[str, dict[str, Any]]] = {}
-    i = 1
+    idx_map: list[tuple[str, dict[str, Any]]] = []  # 0-indexed
+    items: list[tuple[str, str]] = []
 
     # Show nearby notes first — user likely wants to merge
     if nearby_notes:
         console.print("[bold]Related notes:[/bold]")
         for nm in nearby_notes[:3]:
-            console.print(
-                f"  [{i}] [cyan]Update '{nm['title']}' ({nm['date']})[/cyan]"
-            )
-            idx_map[i] = ("note", nm)
-            i += 1
+            items.append((str(len(items) + 1), f"[cyan]Update '{nm['title']}' ({nm['date']})[/cyan]"))
+            idx_map.append(("note", nm))
 
     # Then directories
     if dirs:
@@ -432,50 +418,47 @@ def present_matches(
             label = d["display_name"]
             if d.get("note_count"):
                 label += f" ({d['note_count']} notes)"
-            console.print(f"  [{i}] {label}")
-            idx_map[i] = ("dir", d)
-            i += 1
+            items.append((str(len(items) + 1), label))
+            idx_map.append(("dir", d))
 
-    console.print(f"  [{i}] [dim]New location...[/dim]")
-    console.print(f"  [{i + 1}] [dim]Cancel[/dim]")
-    console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
+    extras = [("n", "New location..."), ("s", "Cancel")]
 
-    choice = Prompt.ask(f"Choice (default 1)", default="1")
+    choice = pick_from_list(
+        items, extras=extras, default="1",
+        allow_text=True, console=console,
+    )
+
+    if choice is None or choice == "s":
+        return None
+    if choice == "n":
+        return _prompt_folder_with_autocomplete(config)
     try:
-        picked = int(choice)
+        picked = int(choice) - 1
+        if 0 <= picked < len(idx_map):
+            kind, data = idx_map[picked]
+            if kind == "note":
+                return RoutingDecision(
+                    space=data["space"],
+                    group_slug=data["group_slug"],
+                    group_display=data.get("group_slug", "").replace("-", " ").title(),
+                    subgroup_slug=data.get("subgroup_slug"),
+                    append_to_note=data["note_id"],
+                )
+            # Directory pick
+            if not data.get("group_slug"):
+                return ask_routing_manually(config, hints={"space": data["space"]})
+            return RoutingDecision(
+                space=data["space"],
+                group_slug=data["group_slug"],
+                group_display=data["display_name"],
+                subgroup_slug=data.get("subgroup_slug"),
+            )
     except ValueError:
-        # Not a number — try to resolve as folder path
         resolved = _resolve_folder_text(config, choice, ask_space=False)
         if resolved:
             return resolved
         return _prompt_folder_with_autocomplete(config)
-
-    if picked == i:
-        return _prompt_folder_with_autocomplete(config)
-    if picked == i + 1 or picked not in idx_map:
-        return None
-
-    kind, data = idx_map[picked]
-
-    if kind == "note":
-        return RoutingDecision(
-            space=data["space"],
-            group_slug=data["group_slug"],
-            group_display=data.get("group_slug", "").replace("-", " ").title(),
-            subgroup_slug=data.get("subgroup_slug"),
-            append_to_note=data["note_id"],
-        )
-
-    # Directory pick
-    if not data.get("group_slug"):
-        return ask_routing_manually(config, hints={"space": data["space"]})
-
-    return RoutingDecision(
-        space=data["space"],
-        group_slug=data["group_slug"],
-        group_display=data["display_name"],
-        subgroup_slug=data.get("subgroup_slug"),
-    )
+    return None
 
 
 class _Back:
@@ -602,8 +585,8 @@ def explore_routing(
 
         # Display results
         console.print()
-        idx = 1
-        idx_map: dict[int, tuple[str, dict[str, Any]]] = {}  # idx -> ("dir"|"note", data)
+        explore_idx_map: list[tuple[str, dict[str, Any]]] = []  # 0-indexed
+        explore_items: list[tuple[str, str]] = []
 
         if dirs:
             console.print("[bold]Folders:[/bold]")
@@ -612,46 +595,40 @@ def explore_routing(
                 if d.get("note_count"):
                     label += f" ({d['note_count']} notes)"
                 space_label = f"  [dim]{d['space']}[/dim]"
-                console.print(f"  [{idx}] {label}{space_label}")
-                idx_map[idx] = ("dir", d)
-                idx += 1
+                explore_items.append((str(len(explore_items) + 1), f"{label}{space_label}"))
+                explore_idx_map.append(("dir", d))
 
         if notes:
             console.print("[bold]Related notes:[/bold]")
             for n in notes:
                 folder = n["group_slug"].replace("-", " ").title()
-                console.print(
-                    f"  [{idx}] [cyan]'{n['title']}'[/cyan] ({n['date']})  "
-                    f"[dim]{n['space']}/{folder}[/dim]"
-                )
-                idx_map[idx] = ("note", n)
-                idx += 1
+                explore_items.append((
+                    str(len(explore_items) + 1),
+                    f"[cyan]'{n['title']}'[/cyan] ({n['date']})  [dim]{n['space']}/{folder}[/dim]",
+                ))
+                explore_idx_map.append(("note", n))
 
-        console.print("  ---")
-        console.print(r"  \[r] Refine search")
-        console.print(r"  \[n] Create new folder")
-        console.print(r"  \[q] Cancel")
+        extras = [("r", "Refine search"), ("n", "Create new folder"), ("q", "Cancel")]
+        choice = pick_from_list(explore_items, extras=extras, default="1", console=console)
 
-        choice = Prompt.ask("Choice (default 1)", default="1")
-
-        if choice.lower() == "q":
+        if choice is None or choice == "q":
             return None
-        if choice.lower() == "r":
+        if choice == "r":
             continue
-        if choice.lower() == "n":
+        if choice == "n":
             return ask_routing_manually(config)
 
         try:
-            picked_idx = int(choice)
+            picked_idx = int(choice) - 1
         except ValueError:
             console.print("[yellow]Invalid choice.[/yellow]")
             continue
 
-        if picked_idx not in idx_map:
+        if picked_idx < 0 or picked_idx >= len(explore_idx_map):
             console.print("[yellow]Invalid choice.[/yellow]")
             continue
 
-        kind, data = idx_map[picked_idx]
+        kind, data = explore_idx_map[picked_idx]
 
         if kind == "dir":
             # Space-level match (no group yet) — shouldn't happen since we filter, but guard
@@ -698,27 +675,25 @@ def _browse_directory(
     else:
         console.print("[dim]No notes yet.[/dim]")
 
-    console.print("  ---")
-    console.print(r"  \[n] New note here")
+    extras = [("n", "New note here")]
     if recent_notes:
-        console.print(r"  \[u] Update an existing note")
-    console.print(r"  \[b] Back to search")
-    console.print(r"  \[q] Cancel")
+        extras.append(("u", "Update an existing note"))
+    extras.extend([("b", "Back to search"), ("q", "Cancel")])
 
-    choice = Prompt.ask("Choice", default="n")
+    choice = pick_from_list([], extras=extras, default="n", console=console)
 
-    if choice.lower() == "q":
+    if choice is None or choice == "q":
         return None
-    if choice.lower() == "b":
+    if choice == "b":
         return _BACK
-    if choice.lower() == "n":
+    if choice == "n":
         return RoutingDecision(
             space=space,
             group_slug=group_slug,
             group_display=display,
             subgroup_slug=subgroup_slug,
         )
-    if choice.lower() == "u" and recent_notes:
+    if choice == "u" and recent_notes:
         console.print("[dim]Which note? (number)[/dim]")
         num = Prompt.ask("Note #", default="1")
         try:
@@ -760,18 +735,14 @@ def _handle_note_pick(
     console.print(
         f"\n[cyan]'{title}'[/cyan] in [bold]{folder}[/bold] [dim]({space})[/dim]"
     )
-    console.print(r"  \[u] Update this note")
-    console.print(r"  \[f] Browse folder")
-    console.print(r"  \[b] Back to search")
-    console.print(r"  \[q] Cancel")
+    extras = [("u", "Update this note"), ("f", "Browse folder"), ("b", "Back to search"), ("q", "Cancel")]
+    choice = pick_from_list([], extras=extras, default="u", console=console)
 
-    choice = Prompt.ask("Choice", default="u")
-
-    if choice.lower() == "q":
+    if choice is None or choice == "q":
         return None
-    if choice.lower() == "b":
+    if choice == "b":
         return _BACK
-    if choice.lower() == "u":
+    if choice == "u":
         return RoutingDecision(
             space=space,
             group_slug=group_slug,
@@ -779,7 +750,7 @@ def _handle_note_pick(
             subgroup_slug=subgroup_slug,
             append_to_note=note_match["note_id"],
         )
-    if choice.lower() == "f":
+    if choice == "f":
         dir_info = {
             "space": space,
             "group_slug": group_slug,

@@ -15,7 +15,7 @@ class _SlashCompleter(Completer):
     COMMANDS = [
         "/agent", "/chat", "/clip", "/folder", "/inbox", "/timer", "/todo",
         "/ideas", "/list", "/search", "/spaces", "/mkdir", "/rmdir",
-        "/delete", "/edit", "/ref", "/sync", "/workflow", "/help", "/quit",
+        "/delete", "/edit", "/ref", "/secret", "/sync", "/workflow", "/help", "/quit",
     ]
 
     def __init__(self, config: NotelyConfig) -> None:
@@ -24,12 +24,27 @@ class _SlashCompleter(Completer):
         self._note_cache: dict[str, list[tuple[str, str]]] = {}
         self._todo_cache: list[dict] | None = None
         self._recent_notes_cache: list[dict] | None = None
+        self._secret_cache: dict[str, dict[str, str]] | None = None
 
     def _get_folders(self) -> list[tuple[str, str, str]]:
         """Get folders, cached."""
         if self._folder_cache is None:
             self._folder_cache = _get_all_folders(self._config)
         return self._folder_cache
+
+    def _get_secrets(self) -> dict[str, dict[str, str]]:
+        """Get secrets structure {service: {key: value}}, cached."""
+        if self._secret_cache is None:
+            try:
+                from ...secrets import SecretsStore
+                self._secret_cache = SecretsStore(self._config.secrets_path).get_all()
+            except Exception:
+                self._secret_cache = {}
+        return self._secret_cache
+
+    def invalidate_secrets(self) -> None:
+        """Clear secret cache after saving new secrets."""
+        self._secret_cache = None
 
     def invalidate(self) -> None:
         """Clear cache after /mkdir or /rmdir."""
@@ -316,6 +331,36 @@ class _SlashCompleter(Completer):
                 ):
                     if sub.startswith(partial):
                         yield Completion(sub, start_position=-len(after), display_meta=hint)
+            return
+
+        # Complete /secret — service names, then key names
+        if text.lower().startswith("/secret "):
+            after = text[8:]
+            secrets = self._get_secrets()
+            if " " not in after:
+                # First word: service names
+                partial = after.lower()
+                for service in sorted(secrets):
+                    if service.startswith(partial) or not partial:
+                        key_count = len(secrets[service])
+                        yield Completion(
+                            service,
+                            start_position=-len(after),
+                            display_meta=f"{key_count} key(s)",
+                        )
+            else:
+                # Second word: key names within the service
+                words = after.split(None, 1)
+                service = words[0]
+                rest = words[1] if len(words) > 1 else ""
+                partial = rest.strip().lower()
+                if service in secrets:
+                    for key in sorted(secrets[service]):
+                        if key.startswith(partial) or not partial:
+                            yield Completion(
+                                key,
+                                start_position=-len(rest),
+                            )
             return
 
         # Complete /delete and /edit — recent note IDs with titles

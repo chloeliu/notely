@@ -14,6 +14,7 @@ from rich.prompt import Prompt
 from ..config import NotelyConfig
 from ..db import Database
 from ..models import ActionItem, InputSize, Note, Refinement
+from ..prompts import confirm_action, no_changes_retry
 from ..storage import (
     generate_file_path, write_note, sync_todo_index, sync_ideas_index,
     classify_input_size,
@@ -205,29 +206,24 @@ def _create_raw_note(
     )
 
     # Show preview and confirm
-    _show_preview(note)
-
     if not auto_confirm:
-        while True:
-            choice = Prompt.ask(r"\[Y]es, save / \[e]dit / \[n]o, cancel", default="Y")
+        def _raw_edit():
+            from ..storage import edit_note_in_editor
+            edited = edit_note_in_editor(note)
+            if edited:
+                note.file_path = generate_file_path(
+                    config, space, group_slug, today, note.title, subgroup_slug
+                )
+            else:
+                console.print("[dim]No changes.[/dim]")
 
-            if choice.lower() == "n":
-                console.print("[yellow]Cancelled.[/yellow]")
-                return
-
-            if choice.lower() == "e":
-                from ..storage import edit_note_in_editor
-                edited = edit_note_in_editor(note)
-                if edited:
-                    note.file_path = generate_file_path(
-                        config, space, group_slug, today, note.title, subgroup_slug
-                    )
-                else:
-                    console.print("[dim]No changes.[/dim]")
-                _show_preview(note)
-                continue
-
-            break
+        if not confirm_action(
+            lambda: _show_preview(note), verb="save",
+            edit_fn=_raw_edit, console=console,
+        ):
+            return
+    else:
+        _show_preview(note)
 
     # Copy attachment if present
     if attachment_path:
@@ -345,11 +341,8 @@ def _create_ai_note(
                         if not auto_confirm:
                             has_changes = show_merge_preview(existing, merge_result)
                             if not has_changes:
-                                retry = Prompt.ask(
-                                    r"\[d]escribe what's new / \[s]kip",
-                                    default="s",
-                                )
-                                if retry.lower() == "d":
+                                retry = no_changes_retry(console=console)
+                                if retry == "d":
                                     hint = Prompt.ask("[dim]What should be updated?[/dim]")
                                     if hint.strip():
                                         merge_input = f"WHAT'S NEW: {hint.strip()}\n\n{masked_text}"
@@ -358,40 +351,40 @@ def _create_ai_note(
                         break
 
                     if not auto_confirm:
-                        while True:
-                            choice = Prompt.ask(
-                                r"\[Y]es, merge / \[e]dit / \[r]evise with AI / \[n]o, skip",
-                                default="Y",
-                            )
-                            if choice.lower() == "n":
-                                console.print("[yellow]Cancelled.[/yellow]")
-                                return
-                            if choice.lower() == "e":
-                                merge_result = edit_merge_result(existing, merge_result)
-                                show_merge_preview(existing, merge_result)
-                                continue
-                            if choice.lower() == "r":
-                                instruction = Prompt.ask("[dim]What should AI change?[/dim]")
-                                if instruction.strip():
-                                    console.print("[dim]Revising merge...[/dim]")
-                                    merge_input = f"WHAT'S NEW: {instruction.strip()}\n\n{masked_text}"
-                                    try:
-                                        merge_result = merge_with_existing(
-                                            merge_input, existing,
-                                            space_config_dict, input_size,
-                                            user_name=config.user_name,
-                                            workspace_path=config.base_dir,
-                                        )
-                                        if secret_mapping:
-                                            merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
-                                            merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
-                                            for item in merge_result.get("new_action_items", []):
-                                                item.task = unmask_secrets(item.task, secret_mapping)
-                                        show_merge_preview(existing, merge_result)
-                                    except Exception as e:
-                                        console.print(f"[red]AI revision failed: {e}[/red]")
-                                continue
-                            break  # 'Y' or default
+                        def _dump_merge_preview():
+                            show_merge_preview(existing, merge_result)
+
+                        def _dump_merge_edit():
+                            nonlocal merge_result
+                            merge_result = edit_merge_result(existing, merge_result)
+
+                        def _dump_merge_revise():
+                            nonlocal merge_result
+                            instruction = Prompt.ask("[dim]What should AI change?[/dim]")
+                            if instruction.strip():
+                                console.print("[dim]Revising merge...[/dim]")
+                                m_input = f"WHAT'S NEW: {instruction.strip()}\n\n{masked_text}"
+                                try:
+                                    merge_result = merge_with_existing(
+                                        m_input, existing,
+                                        space_config_dict, input_size,
+                                        user_name=config.user_name,
+                                        workspace_path=config.base_dir,
+                                    )
+                                    if secret_mapping:
+                                        merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
+                                        merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
+                                        for item in merge_result.get("new_action_items", []):
+                                            item.task = unmask_secrets(item.task, secret_mapping)
+                                except Exception as e:
+                                    console.print(f"[red]AI revision failed: {e}[/red]")
+
+                        if not confirm_action(
+                            _dump_merge_preview, verb="merge",
+                            edit_fn=_dump_merge_edit, revise_fn=_dump_merge_revise,
+                            console=console,
+                        ):
+                            return
 
                     apply_merge(config, db, existing, merge_result, raw_text)
                     try_vector_sync_note(config, existing)
@@ -423,11 +416,9 @@ def _create_ai_note(
         except SnippetResult as sr:
             snippet_data = sr.data
             if secret_mapping:
-                for item in snippet_data.get("items", []):
-                    item["value"] = unmask_secrets(item["value"], secret_mapping)
-                    if item.get("description"):
-                        item["description"] = unmask_secrets(item["description"], secret_mapping)
-            _handle_snippet_result(config, db, snippet_data)
+                _handle_secret_snippets(config, snippet_data, secret_mapping)
+            else:
+                _handle_snippet_result(config, db, snippet_data)
             return
         except Exception as e:
             console.print(f"[red]AI structuring failed: {e}[/red]")
@@ -488,65 +479,55 @@ def _create_ai_note(
         )
 
         # Show preview and confirm
-        _show_preview(note)
-
         if routing.group_is_new and space_cfg:
             console.print(f"  [yellow]NEW {space_cfg.group_by}: {routing.group_display} ({routing.group_slug})[/yellow]")
         if routing.subgroup_is_new and routing.subgroup_slug and space_cfg:
             console.print(f"  [yellow]NEW {space_cfg.subgroup_by}: {routing.subgroup_display} ({routing.subgroup_slug})[/yellow]")
 
         if not auto_confirm:
-            # Preview → edit/revise loop
-            while True:
-                choice = Prompt.ask(
-                    r"\[Y]es, save / \[e]dit / \[r]evise with AI / \[n]o, cancel",
-                    default="Y",
-                )
+            def _dump_note_edit():
+                from ..storage import edit_note_in_editor
+                edited = edit_note_in_editor(note)
+                if edited:
+                    note.file_path = generate_file_path(
+                        config, routing.space, routing.group_slug, meta.date,
+                        note.title, routing.subgroup_slug,
+                    )
+                else:
+                    console.print("[dim]No changes.[/dim]")
 
-                if choice.lower() == "n":
-                    console.print("[yellow]Cancelled.[/yellow]")
-                    return
-
-                if choice.lower() == "e":
-                    from ..storage import edit_note_in_editor
-                    edited = edit_note_in_editor(note)
-                    if edited:
-                        note.file_path = generate_file_path(
-                            config, routing.space, routing.group_slug, meta.date,
-                            note.title, routing.subgroup_slug,
+            def _dump_note_revise():
+                instruction = Prompt.ask("[dim]What should AI change?[/dim]")
+                if instruction.strip():
+                    console.print("[dim]Revising...[/dim]")
+                    try:
+                        from ..ai import revise_note
+                        revised = revise_note(
+                            note, instruction.strip(), space_config_dict, input_size,
+                            user_name=config.user_name,
                         )
-                    else:
-                        console.print("[dim]No changes.[/dim]")
-                    _show_preview(note)
-                    continue  # Back to preview
+                        note.title = revised.metadata.title
+                        note.summary = revised.metadata.summary
+                        note.tags = revised.metadata.tags
+                        note.participants = revised.metadata.participants
+                        note.action_items = revised.metadata.action_items
+                        note.body = revised.body_markdown
+                        note.refinement = Refinement.HUMAN_REVIEWED
+                        note.file_path = generate_file_path(
+                            config, routing.space, routing.group_slug,
+                            revised.metadata.date, note.title, routing.subgroup_slug,
+                        )
+                    except Exception as e:
+                        console.print(f"[red]AI revision failed: {e}[/red]")
 
-                if choice.lower() == "r":
-                    instruction = Prompt.ask("[dim]What should AI change?[/dim]")
-                    if instruction.strip():
-                        console.print("[dim]Revising...[/dim]")
-                        try:
-                            from ..ai import revise_note
-                            revised = revise_note(
-                                note, instruction.strip(), space_config_dict, input_size,
-                                user_name=config.user_name,
-                            )
-                            note.title = revised.metadata.title
-                            note.summary = revised.metadata.summary
-                            note.tags = revised.metadata.tags
-                            note.participants = revised.metadata.participants
-                            note.action_items = revised.metadata.action_items
-                            note.body = revised.body_markdown
-                            note.refinement = Refinement.HUMAN_REVIEWED
-                            note.file_path = generate_file_path(
-                                config, routing.space, routing.group_slug,
-                                revised.metadata.date, note.title, routing.subgroup_slug,
-                            )
-                        except Exception as e:
-                            console.print(f"[red]AI revision failed: {e}[/red]")
-                    _show_preview(note)
-                    continue  # Back to preview
-
-                break  # 'Y' or default — proceed to save
+            if not confirm_action(
+                lambda: _show_preview(note), verb="save",
+                edit_fn=_dump_note_edit, revise_fn=_dump_note_revise,
+                console=console,
+            ):
+                return
+        else:
+            _show_preview(note)
 
         # Copy attachment if present
         if attachment_path:
@@ -574,6 +555,44 @@ def _handle_list_items(
     """Handle AI choosing to add list items instead of a full note."""
     from ..storage import confirm_and_save_list_items
     confirm_and_save_list_items(config, db, result, auto_confirm=auto_confirm)
+
+
+def _handle_secret_snippets(config, data, secret_mapping):
+    """Route |||...|||-marked snippets to .secrets.toml using AI's entity/key naming."""
+    from rich.panel import Panel
+    from rich.prompt import Prompt
+
+    from ..ai import unmask_secrets
+
+    console = Console()
+    items = data.get("items", [])
+    if not items:
+        console.print("[yellow]AI returned no items.[/yellow]")
+        return
+
+    # Preview with masked values
+    lines = [f"[bold]Saving {len(items)} secret(s) to .secrets.toml:[/bold]", ""]
+    for i, item in enumerate(items, 1):
+        service = item.get("entity", "auto")
+        key = item.get("key", "secret")
+        desc = f" — {item['description']}" if item.get("description") else ""
+        lines.append(f"  {i}. [cyan]{service}[/cyan].{key} = ********[dim]{desc}[/dim]")
+    console.print(Panel("\n".join(lines), title="Secrets", border_style="green"))
+
+    def _secrets_preview():
+        pass  # already shown above
+
+    if not confirm_action(_secrets_preview, verb="save"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+
+    from ..secrets import SecretsStore
+    store = SecretsStore(config.secrets_path)
+    for item in items:
+        real_value = unmask_secrets(item.get("value", ""), secret_mapping)
+        store.store(item.get("entity", "auto"), item.get("key", "secret"), real_value)
+
+    console.print(f"[green]Saved {len(items)} secret(s) to .secrets.toml[/green]")
 
 
 def _handle_snippet_result(

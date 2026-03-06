@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 from ...config import NotelyConfig
 from ...db import Database
 from ...models import NoteRouting
+from ...prompts import confirm_action, confirm_destructive
 from ...storage import show_merge_preview, edit_merge_result, apply_merge
 
 from ._shared import console
@@ -98,11 +99,7 @@ def _handle_inbox(
                 "[dim]Clearing removes dedup records — "
                 "next /workflow pull will re-fetch these items.[/dim]"
             )
-            confirm = Prompt.ask(
-                f"Delete {total} item(s)?",
-                choices=["y", "n"], default="n",
-            )
-            if confirm == "y":
+            if confirm_destructive(f"Delete {total} item(s)?"):
                 db.conn.execute(f"DELETE FROM inbox {where}", params)
                 db.conn.commit()
                 console.print(f"[yellow]Deleted {total} item(s).[/yellow]")
@@ -285,24 +282,21 @@ def _handle_inbox(
                     db.update_inbox_status(row["id"], "skipped")
                     continue
 
-                try:
-                    merge_choice = Prompt.ask(
-                        r"\[Y]es, merge / \[e]dit / \[n]o, skip",
-                        default="Y",
-                    )
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]Inbox review cancelled.[/yellow]")
-                    return
+                mr = merge_result  # mutable ref for closure
 
-                if merge_choice.lower() == "n":
+                def _merge_preview():
+                    show_merge_preview(existing, mr)
+
+                def _merge_edit():
+                    nonlocal mr
+                    mr = edit_merge_result(existing, mr)
+
+                if not confirm_action(_merge_preview, verb="merge", edit_fn=_merge_edit):
                     db.update_inbox_status(row["id"], "skipped")
                     console.print("[yellow]Skipped.[/yellow]")
                     continue
-                if merge_choice.lower() == "e":
-                    merge_result = edit_merge_result(existing, merge_result)
-                    show_merge_preview(existing, merge_result)
 
-                apply_merge(config, db, existing, merge_result, merge_text, merge_text)
+                apply_merge(config, db, existing, mr, merge_text, merge_text)
                 db.update_inbox_status(row["id"], "filed", filed_note_id=existing.id)
 
                 if existing.action_items:
@@ -345,28 +339,20 @@ def _handle_inbox(
             )
 
             # Quick confirm before save
-            try:
-                save_choice = Prompt.ask(
-                    r"\[Y]es, save / \[e]dit first / \[n]o, skip",
-                    default="Y",
-                )
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Inbox review cancelled.[/yellow]")
-                return
+            def _inbox_preview():
+                pass  # already shown above
 
-            if save_choice.lower() == "n":
-                db.update_inbox_status(row["id"], "skipped")
-                console.print("[yellow]Skipped.[/yellow]")
-                continue
-
-            if save_choice.lower() == "e":
+            def _inbox_edit():
                 edited = edit_note_in_editor(note)
                 if edited:
                     note.file_path = generate_file_path(
                         config, target_space, target_group, note_date, note.title,
                     )
-                else:
-                    console.print("[dim]No changes.[/dim]")
+
+            if not confirm_action(_inbox_preview, verb="save", edit_fn=_inbox_edit):
+                db.update_inbox_status(row["id"], "skipped")
+                console.print("[yellow]Skipped.[/yellow]")
+                continue
 
             # Save via shared pipeline
             save_and_sync(config, db, note, routing=NoteRouting(
@@ -481,23 +467,21 @@ def _process_raw_inbox_item(
             db.update_inbox_status(row["id"], "skipped")
             return
 
-        try:
-            merge_choice = Prompt.ask(
-                r"\[Y]es, merge / \[e]dit / \[n]o, skip", default="Y",
-            )
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Cancelled.[/yellow]")
-            return
+        mr = merge_result  # mutable ref for closure
 
-        if merge_choice.lower() == "n":
+        def _raw_merge_preview():
+            show_merge_preview(existing, mr)
+
+        def _raw_merge_edit():
+            nonlocal mr
+            mr = edit_merge_result(existing, mr)
+
+        if not confirm_action(_raw_merge_preview, verb="merge", edit_fn=_raw_merge_edit):
             db.update_inbox_status(row["id"], "skipped")
             console.print("[yellow]Skipped.[/yellow]")
             return
-        if merge_choice.lower() == "e":
-            merge_result = edit_merge_result(existing, merge_result)
-            show_merge_preview(existing, merge_result)
 
-        apply_merge(config, db, existing, merge_result, raw_text, raw_text)
+        apply_merge(config, db, existing, mr, raw_text, raw_text)
         db.update_inbox_status(row["id"], "filed", filed_note_id=existing.id)
         sync_todo_index(config, db)
         sync_ideas_index(config, db)
@@ -571,31 +555,24 @@ def _process_raw_inbox_item(
         for bl in note.body.strip().splitlines()[:15]:
             preview_lines.append(f"[dim]{bl}[/dim]")
 
-    console.print(Panel(
-        "\n".join(preview_lines),
-        title="AI Structured",
-        border_style="green",
-    ))
+    def _ai_preview():
+        console.print(Panel(
+            "\n".join(preview_lines),
+            title="AI Structured",
+            border_style="green",
+        ))
 
-    try:
-        save_choice = Prompt.ask(
-            r"\[Y]es, save / \[e]dit first / \[n]o, skip", default="Y",
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Cancelled.[/yellow]")
-        return
-
-    if save_choice.lower() == "n":
-        db.update_inbox_status(row["id"], "skipped")
-        console.print("[yellow]Skipped.[/yellow]")
-        return
-
-    if save_choice.lower() == "e":
+    def _ai_edit():
         edited = edit_note_in_editor(note)
         if edited:
             note.file_path = generate_file_path(
                 config, routing.space, routing.group_slug, note_date, note.title,
             )
+
+    if not confirm_action(_ai_preview, verb="save", edit_fn=_ai_edit):
+        db.update_inbox_status(row["id"], "skipped")
+        console.print("[yellow]Skipped.[/yellow]")
+        return
 
     save_and_sync(config, db, note, routing=NoteRouting(
         space=routing.space,
@@ -686,25 +663,20 @@ def _save_raw_inbox_item(
         source_url=row.get("source_url", ""),
     )
 
-    try:
-        save_choice = Prompt.ask(
-            r"\[Y]es, save / \[e]dit first / \[n]o, skip", default="Y",
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Cancelled.[/yellow]")
-        return
+    def _raw_save_preview():
+        pass  # note content already visible from inbox preview
 
-    if save_choice.lower() == "n":
-        db.update_inbox_status(row["id"], "skipped")
-        console.print("[yellow]Skipped.[/yellow]")
-        return
-
-    if save_choice.lower() == "e":
+    def _raw_save_edit():
         edited = edit_note_in_editor(note)
         if edited:
             note.file_path = generate_file_path(
                 config, routing.space, routing.group_slug, note_date, note.title,
             )
+
+    if not confirm_action(_raw_save_preview, verb="save", edit_fn=_raw_save_edit):
+        db.update_inbox_status(row["id"], "skipped")
+        console.print("[yellow]Skipped.[/yellow]")
+        return
 
     save_and_sync(config, db, note, routing=NoteRouting(
         space=routing.space,

@@ -37,7 +37,7 @@ Notely has three core data types:
 |------|---------|---------|
 | **Notes** | Markdown files + SQLite + LanceDB vectors | Structured knowledge — meetings, Slack threads, documents |
 | **Snippets** | SQLite `snippets` table with FTS5 | Reference data — NPIs, account numbers, URLs, quick facts |
-| **Secrets** | `.secrets.toml` (gitignored) | Credentials — API keys, passwords, tokens |
+| **Secrets** | `.secrets.toml` (gitignored) | Credentials — API keys, passwords, tokens. Auto-routed when `\|\|\|` markers detected |
 
 **Todos** are built as a module on top of Notes. Action items live in note frontmatter and are indexed into the `action_items` table in SQLite. Standalone todos (not linked to a note) are also supported.
 
@@ -148,6 +148,7 @@ src/notely/
 ├── storage.py         # Markdown file I/O, CSV sync, merge helpers
 ├── ai.py              # Claude API integration, prompt building
 ├── templates.py       # User-editable prompt template loading
+├── prompts.py         # Standardized interactive CLI prompts
 ├── routing.py         # Duplicate detection + folder routing pipeline
 ├── vectors.py         # LanceDB vector store, semantic search
 ├── files.py           # File detection, text extraction (PDF/image)
@@ -289,6 +290,24 @@ flowchart TD
 
 Hash checks use paste content only (not typed context), so "meeting notes [paste]" and "[paste]" both match the same hash.
 
+## Secret Handling
+
+When text is wrapped in `|||` markers, notely treats it as sensitive:
+
+1. `mask_secrets()` scans the **full input** (including typed context around pastes) for `|||value|||` patterns
+2. Values are replaced with `[REDACTED_N]` before the AI sees anything
+3. If the AI classifies the input as reference data (snippet), the values are routed to `.secrets.toml` with the AI's entity/key naming — **not** saved as visible snippets in the database
+4. A confirmation prompt shows masked values before saving
+5. Retrieve with `/secret` — tab-completes service names and keys
+
+```
+Input:    pypi token |||pypi-AgEIcHl...|||
+AI sees:  pypi token [REDACTED_1]
+Stored:   .secrets.toml → [pypi] api_token = "pypi-AgEIcHl..."
+```
+
+Key design: `mask_secrets()` runs on the full `raw_text` (which contains the `|||` markers from typed context), then replaces the real values in whichever text portion is sent to the AI. This handles the case where `|||` markers are typed around a paste — the paste content alone wouldn't contain the markers.
+
 ## Embedding Design
 
 | Table | Row per | Embedding text | Purpose |
@@ -323,7 +342,14 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-108 tests covering: database operations, config loading, vector escaping, timer logic, todo dedup, todo mode (flagging, folders, timer IDs).
+140 tests covering: database operations, config loading, vector escaping, timer logic, todo dedup, todo mode, interactive prompts, date parsing.
+
+### CI/CD
+
+- **`.github/workflows/test.yml`** — runs pytest on Python 3.10–3.13 on every push/PR to main
+- **`.github/workflows/publish.yml`** — builds and publishes to PyPI on `v*` tag push using [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
+
+Release workflow: bump version in `pyproject.toml` → commit → `git tag v0.x.x && git push origin v0.x.x` → auto-publishes.
 
 ## Dependencies
 

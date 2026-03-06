@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "notely"
-version = "0.1.1"
+version = "0.1.2"
 description = "Structured note system for AI-powered retrieval. Paste anything, AI organizes it."
 license = "MIT"
 readme = "README.md"

@@ -12,6 +12,7 @@ from rich.prompt import Prompt
 from ...config import NotelyConfig
 from ...db import Database
 from ...models import NoteRouting
+from ...prompts import confirm_action, no_changes_retry
 from ...storage import classify_input_size, show_merge_preview, edit_merge_result, apply_merge
 
 from ._shared import console, _fuzzy_match_folder
@@ -248,15 +249,21 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
             return
 
         # Step 4: Mask secrets before sending to AI
-        # When user typed instructions, mask only the paste content for AI
-        # so the instruction isn't duplicated in the content
-        ai_text = paste_content if (user_context and paste_content) else str(raw_text)
-        masked_text, secret_mapping = mask_secrets(ai_text)
+        # Always scan full raw_text for |||...|||  markers — the markers may be
+        # in the typed context (user types ||| around a paste), not in paste_content.
+        _, secret_mapping = mask_secrets(str(raw_text))
 
         # Auto-capture secrets to .secrets.toml
         if secret_mapping:
             from ...secrets import SecretsStore
             SecretsStore(config.secrets_path).store_mapping(secret_mapping)
+
+        # Build the text for the AI — mask secrets in whichever portion we send
+        ai_text = paste_content if (user_context and paste_content) else str(raw_text)
+        masked_text = ai_text
+        if secret_mapping:
+            for placeholder, value in secret_mapping.items():
+                masked_text = masked_text.replace(value, placeholder)
 
         # Build space config for the AI prompt
         space_cfg = config.get_space(routing.space)
@@ -289,10 +296,13 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
                         if hint.strip():
                             merge_input = f"WHAT'S NEW: {hint.strip()}\n\n{masked_text}"
 
+                    # State container for merge result (mutated by callbacks)
+                    _mr = {"result": None}
+
                     while True:
                         console.print(f"[dim]Merging with '{existing.title}'...[/dim]")
                         try:
-                            merge_result = merge_with_existing(
+                            _mr["result"] = merge_with_existing(
                                 merge_input, existing,
                                 space_config_dict, input_size,
                                 user_name=config.user_name,
@@ -304,20 +314,17 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
 
                         # Unmask secrets
                         if secret_mapping:
-                            merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
-                            merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
-                            for item in merge_result.get("new_action_items", []):
+                            _mr["result"]["updated_body"] = unmask_secrets(_mr["result"]["updated_body"], secret_mapping)
+                            _mr["result"]["updated_summary"] = unmask_secrets(_mr["result"]["updated_summary"], secret_mapping)
+                            for item in _mr["result"].get("new_action_items", []):
                                 item.task = unmask_secrets(item.task, secret_mapping)
 
                         # Preview merge — show what changed
-                        has_changes = show_merge_preview(existing, merge_result)
+                        has_changes = show_merge_preview(existing, _mr["result"])
 
                         if not has_changes:
-                            retry = Prompt.ask(
-                                r"\[d]escribe what's new / \[s]kip",
-                                default="s",
-                            )
-                            if retry.lower() == "d":
+                            retry = no_changes_retry(console=console)
+                            if retry == "d":
                                 hint = Prompt.ask("[dim]What should be updated?[/dim]")
                                 if hint.strip():
                                     merge_input = f"WHAT'S NEW: {hint.strip()}\n\n{masked_text}"
@@ -325,43 +332,41 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
                             return
                         break
 
-                    while True:
-                        choice = Prompt.ask(
-                            r"\[Y]es, merge / \[e]dit / \[r]evise with AI / \[n]o, skip",
-                            default="Y",
-                        )
-                        if choice.lower() == "n":
-                            console.print("[yellow]Skipped.[/yellow]")
-                            return
+                    merge_result = _mr["result"]
 
-                        if choice.lower() == "e":
-                            merge_result = edit_merge_result(existing, merge_result)
-                            # Re-show preview after edit
-                            show_merge_preview(existing, merge_result)
-                            continue
+                    def _merge_preview():
+                        show_merge_preview(existing, merge_result)
 
-                        if choice.lower() == "r":
-                            instruction = Prompt.ask("[dim]What should AI change?[/dim]")
-                            if instruction.strip():
-                                console.print("[dim]Revising merge...[/dim]")
-                                merge_input = f"WHAT'S NEW: {instruction.strip()}\n\n{masked_text}"
-                                try:
-                                    merge_result = merge_with_existing(
-                                        merge_input, existing,
-                                        space_config_dict, input_size,
-                                        user_name=config.user_name,
-                                    )
-                                    if secret_mapping:
-                                        merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
-                                        merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
-                                        for item in merge_result.get("new_action_items", []):
-                                            item.task = unmask_secrets(item.task, secret_mapping)
-                                    show_merge_preview(existing, merge_result)
-                                except Exception as e:
-                                    console.print(f"[red]AI revision failed: {e}[/red]")
-                            continue
+                    def _merge_edit():
+                        nonlocal merge_result
+                        merge_result = edit_merge_result(existing, merge_result)
 
-                        break  # 'Y' or default — proceed to merge
+                    def _merge_revise():
+                        nonlocal merge_result
+                        instruction = Prompt.ask("[dim]What should AI change?[/dim]")
+                        if instruction.strip():
+                            console.print("[dim]Revising merge...[/dim]")
+                            m_input = f"WHAT'S NEW: {instruction.strip()}\n\n{masked_text}"
+                            try:
+                                merge_result = merge_with_existing(
+                                    m_input, existing,
+                                    space_config_dict, input_size,
+                                    user_name=config.user_name,
+                                )
+                                if secret_mapping:
+                                    merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
+                                    merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
+                                    for item in merge_result.get("new_action_items", []):
+                                        item.task = unmask_secrets(item.task, secret_mapping)
+                            except Exception as e:
+                                console.print(f"[red]AI revision failed: {e}[/red]")
+
+                    if not confirm_action(
+                        _merge_preview, verb="merge",
+                        edit_fn=_merge_edit, revise_fn=_merge_revise,
+                        console=console,
+                    ):
+                        return
 
                     apply_merge(config, db, existing, merge_result, raw_text, paste_content)
                     try_vector_sync_note(config, existing)
@@ -401,7 +406,13 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
             _handle_list_result(config, db, list_data)
             return
         except SnippetResult as e:
-            _handle_snippet_result(config, db, e.data, folder_default)
+            snippet_data = e.data
+            if secret_mapping:
+                # |||...|||  markers = user explicitly said "secret"
+                # Use AI's entity/key naming to store in .secrets.toml
+                _handle_secret_snippets(config, snippet_data, secret_mapping)
+            else:
+                _handle_snippet_result(config, db, snippet_data, folder_default)
             return
         except Exception as e:
             console.print(f"[red]AI structuring failed: {e}[/red]")
@@ -494,8 +505,7 @@ def _handle_note_result(config, db, result, raw_text, input_size, paste_content=
     )
 
     # Preview → edit/revise loop
-    while True:
-        # Preview panel
+    def _note_preview():
         lines = [
             f"[bold]Space:[/bold]    {note.space}",
             f"[bold]Title:[/bold]    {note.title}",
@@ -517,68 +527,57 @@ def _handle_note_result(config, db, result, raw_text, input_size, paste_content=
             for item in note.action_items:
                 due_str = f" (due {item.due})" if item.due else ""
                 lines.append(f"    - [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
-
-        # Show full body
         if note.body:
             lines.append("")
             for bl in note.body.strip().splitlines():
                 lines.append(f"[dim]{bl}[/dim]")
-
         if routing.group_is_new and space_cfg:
             lines.append(f"[yellow]NEW {space_cfg.group_by}: {routing.group_display}[/yellow]")
         if routing.subgroup_is_new and routing.subgroup_slug and space_cfg:
             lines.append(f"[yellow]NEW {space_cfg.subgroup_by}: {routing.subgroup_display}[/yellow]")
-
         console.print(Panel("\n".join(lines), title="Note", border_style="green"))
 
-        choice = Prompt.ask(
-            r"\[Y]es, save / \[e]dit / \[r]evise with AI / \[n]o, skip",
-            default="Y",
-        )
+    def _note_edit():
+        from ...storage import edit_note_in_editor
+        edited = edit_note_in_editor(note)
+        if edited:
+            note.file_path = generate_file_path(
+                config, routing.space, routing.group_slug, meta.date,
+                note.title, routing.subgroup_slug,
+            )
+        else:
+            console.print("[dim]No changes.[/dim]")
 
-        if choice.lower() == "n":
-            console.print("[yellow]Skipped.[/yellow]")
-            return
-
-        if choice.lower() == "e":
-            from ...storage import edit_note_in_editor
-            edited = edit_note_in_editor(note)
-            if edited:
-                note.file_path = generate_file_path(
-                    config, routing.space, routing.group_slug, meta.date,
-                    note.title, routing.subgroup_slug,
+    def _note_revise():
+        instruction = Prompt.ask("[dim]What should AI change?[/dim]")
+        if instruction.strip():
+            console.print("[dim]Revising...[/dim]")
+            try:
+                from ...ai import revise_note
+                revised = revise_note(
+                    note, instruction.strip(), space_config_dict, input_size,
+                    user_name=config.user_name,
                 )
-            else:
-                console.print("[dim]No changes.[/dim]")
-            continue  # Back to preview
+                note.title = revised.metadata.title
+                note.summary = revised.metadata.summary
+                note.tags = revised.metadata.tags
+                note.participants = revised.metadata.participants
+                note.action_items = revised.metadata.action_items
+                note.body = revised.body_markdown
+                note.refinement = Refinement.HUMAN_REVIEWED
+                note.file_path = generate_file_path(
+                    config, routing.space, routing.group_slug,
+                    revised.metadata.date, note.title, routing.subgroup_slug,
+                )
+            except Exception as e:
+                console.print(f"[red]AI revision failed: {e}[/red]")
 
-        if choice.lower() == "r":
-            instruction = Prompt.ask("[dim]What should AI change?[/dim]")
-            if instruction.strip():
-                console.print("[dim]Revising...[/dim]")
-                try:
-                    from ...ai import revise_note
-                    revised = revise_note(
-                        note, instruction.strip(), space_config_dict, input_size,
-                        user_name=config.user_name,
-                    )
-                    # Apply revised output back to note
-                    note.title = revised.metadata.title
-                    note.summary = revised.metadata.summary
-                    note.tags = revised.metadata.tags
-                    note.participants = revised.metadata.participants
-                    note.action_items = revised.metadata.action_items
-                    note.body = revised.body_markdown
-                    note.refinement = Refinement.HUMAN_REVIEWED
-                    note.file_path = generate_file_path(
-                        config, routing.space, routing.group_slug,
-                        revised.metadata.date, note.title, routing.subgroup_slug,
-                    )
-                except Exception as e:
-                    console.print(f"[red]AI revision failed: {e}[/red]")
-            continue  # Back to preview
-
-        break  # 'Y' or default — proceed to save
+    if not confirm_action(
+        _note_preview, verb="save",
+        edit_fn=_note_edit, revise_fn=_note_revise,
+        console=console,
+    ):
+        return
 
     # Copy attachment if present
     if attachment_path:
@@ -594,6 +593,44 @@ def _handle_note_result(config, db, result, raw_text, input_size, paste_content=
                   source_file=attachment_path)
 
     console.print(f"[green]Saved:[/green] {note.file_path}")
+
+
+def _handle_secret_snippets(config, data, secret_mapping):
+    """Route |||...|||-marked snippets to .secrets.toml using AI's entity/key naming."""
+    from rich.panel import Panel
+
+    from ...ai import unmask_secrets
+
+    items = data.get("items", [])
+    if not items:
+        console.print("[yellow]AI returned no items.[/yellow]")
+        return
+
+    # Build preview lines
+    preview_data = []
+    for item in items:
+        service = item.get("entity", "auto")
+        key = item.get("key", "secret")
+        desc = f" — {item['description']}" if item.get("description") else ""
+        preview_data.append((service, key, desc))
+
+    def _secret_preview():
+        lines = [f"[bold]Saving {len(preview_data)} secret(s) to .secrets.toml:[/bold]", ""]
+        for i, (service, key, desc) in enumerate(preview_data, 1):
+            lines.append(f"  {i}. [cyan]{service}[/cyan].{key} = ********[dim]{desc}[/dim]")
+        console.print(Panel("\n".join(lines), title="Secrets", border_style="green"))
+
+    if not confirm_action(_secret_preview, verb="save", console=console):
+        return
+
+    # Save to .secrets.toml
+    from ...secrets import SecretsStore
+    store = SecretsStore(config.secrets_path)
+    for item in items:
+        real_value = unmask_secrets(item.get("value", ""), secret_mapping)
+        store.store(item.get("entity", "auto"), item.get("key", "secret"), real_value)
+
+    console.print(f"[green]Saved {len(items)} secret(s) to .secrets.toml[/green]")
 
 
 def _handle_snippet_result(config, db, data, working_folder=None):
@@ -732,8 +769,12 @@ def _clip_url(config: NotelyConfig, arg: str, working_folder: dict) -> None:
             _handle_list_result(config, db, list_data)
             return
         except SnippetResult as e:
-            folder_dict = folder if folder else None
-            _handle_snippet_result(config, db, e.data, folder_dict)
+            snippet_data = e.data
+            if secret_mapping:
+                _handle_secret_snippets(config, snippet_data, secret_mapping)
+            else:
+                folder_dict = folder if folder else None
+                _handle_snippet_result(config, db, snippet_data, folder_dict)
             return
         except Exception as e:
             console.print(f"[red]AI structuring failed: {e}[/red]")
@@ -795,86 +836,77 @@ def _clip_url(config: NotelyConfig, arg: str, working_folder: dict) -> None:
             space_metadata=space_metadata,
         )
 
-        # Preview
-        lines = [
-            f"[bold]Space:[/bold]    {note.space}",
-            f"[bold]Title:[/bold]    {note.title}",
-            f"[bold]Date:[/bold]     {note.date}",
-            f"[bold]Source:[/bold]   {note.source}",
-            f"[bold]URL:[/bold]      {note.source_url}",
-        ]
-        for key in ("client", "topic", "category"):
-            val = note.space_metadata.get(key)
-            if val:
-                display = note.space_metadata.get(f"{key}_display", val)
-                lines.append(f"[bold]{key.title()}:[/bold]  {display}")
-        if note.tags:
-            lines.append(f"[bold]Tags:[/bold]     {', '.join(note.tags)}")
-        if note.participants:
-            lines.append(f"[bold]People:[/bold]   {', '.join(note.participants)}")
-        lines.append(f"[bold]Summary:[/bold]  {note.summary}")
-        if note.action_items:
-            lines.append(f"[bold]Actions:[/bold]  {len(note.action_items)} item(s)")
-            for item in note.action_items:
-                due_str = f" (due {item.due})" if item.due else ""
-                lines.append(f"    - [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
+        # Preview + confirm with edit/revise loop
+        def _clip_preview():
+            lines = [
+                f"[bold]Space:[/bold]    {note.space}",
+                f"[bold]Title:[/bold]    {note.title}",
+                f"[bold]Date:[/bold]     {note.date}",
+                f"[bold]Source:[/bold]   {note.source}",
+                f"[bold]URL:[/bold]      {note.source_url}",
+            ]
+            for key in ("client", "topic", "category"):
+                val = note.space_metadata.get(key)
+                if val:
+                    display = note.space_metadata.get(f"{key}_display", val)
+                    lines.append(f"[bold]{key.title()}:[/bold]  {display}")
+            if note.tags:
+                lines.append(f"[bold]Tags:[/bold]     {', '.join(note.tags)}")
+            if note.participants:
+                lines.append(f"[bold]People:[/bold]   {', '.join(note.participants)}")
+            lines.append(f"[bold]Summary:[/bold]  {note.summary}")
+            if note.action_items:
+                lines.append(f"[bold]Actions:[/bold]  {len(note.action_items)} item(s)")
+                for item in note.action_items:
+                    due_str = f" (due {item.due})" if item.due else ""
+                    lines.append(f"    - [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
+            if note.body:
+                lines.append("")
+                for bl in note.body.strip().splitlines():
+                    lines.append(f"[dim]{bl}[/dim]")
+            console.print(Panel("\n".join(lines), title="Web Clip", border_style="green"))
 
-        if note.body:
-            lines.append("")
-            for bl in note.body.strip().splitlines():
-                lines.append(f"[dim]{bl}[/dim]")
+        def _clip_edit():
+            from ...storage import edit_note_in_editor
+            edited = edit_note_in_editor(note)
+            if edited:
+                note.file_path = generate_file_path(
+                    config, routing.space, routing.group_slug, meta.date,
+                    note.title, routing.subgroup_slug,
+                )
+            else:
+                console.print("[dim]No changes.[/dim]")
 
-        console.print(Panel("\n".join(lines), title="Web Clip", border_style="green"))
-
-        # User confirmation with edit/revise loop
-        while True:
-            choice = Prompt.ask(
-                r"\[Y]es, save / \[e]dit / \[r]evise with AI / \[n]o, skip",
-                default="Y",
-            )
-
-            if choice.lower() == "n":
-                console.print("[yellow]Skipped.[/yellow]")
-                return
-
-            if choice.lower() == "e":
-                from ...storage import edit_note_in_editor
-                edited = edit_note_in_editor(note)
-                if edited:
-                    note.file_path = generate_file_path(
-                        config, routing.space, routing.group_slug, meta.date,
-                        note.title, routing.subgroup_slug,
+        def _clip_revise():
+            instruction = Prompt.ask("[dim]What should AI change?[/dim]")
+            if instruction.strip():
+                console.print("[dim]Revising...[/dim]")
+                try:
+                    from ...ai import revise_note
+                    revised = revise_note(
+                        note, instruction.strip(), space_config_dict, input_size,
+                        user_name=config.user_name,
                     )
-                else:
-                    console.print("[dim]No changes.[/dim]")
-                continue
+                    note.title = revised.metadata.title
+                    note.summary = revised.metadata.summary
+                    note.tags = revised.metadata.tags
+                    note.participants = revised.metadata.participants
+                    note.action_items = revised.metadata.action_items
+                    note.body = revised.body_markdown
+                    note.refinement = Refinement.HUMAN_REVIEWED
+                    note.file_path = generate_file_path(
+                        config, routing.space, routing.group_slug,
+                        revised.metadata.date, note.title, routing.subgroup_slug,
+                    )
+                except Exception as e:
+                    console.print(f"[red]AI revision failed: {e}[/red]")
 
-            if choice.lower() == "r":
-                instruction = Prompt.ask("[dim]What should AI change?[/dim]")
-                if instruction.strip():
-                    console.print("[dim]Revising...[/dim]")
-                    try:
-                        from ...ai import revise_note
-                        revised = revise_note(
-                            note, instruction.strip(), space_config_dict, input_size,
-                            user_name=config.user_name,
-                        )
-                        note.title = revised.metadata.title
-                        note.summary = revised.metadata.summary
-                        note.tags = revised.metadata.tags
-                        note.participants = revised.metadata.participants
-                        note.action_items = revised.metadata.action_items
-                        note.body = revised.body_markdown
-                        note.refinement = Refinement.HUMAN_REVIEWED
-                        note.file_path = generate_file_path(
-                            config, routing.space, routing.group_slug,
-                            revised.metadata.date, note.title, routing.subgroup_slug,
-                        )
-                    except Exception as e:
-                        console.print(f"[red]AI revision failed: {e}[/red]")
-                continue
-
-            break  # 'Y' or default
+        if not confirm_action(
+            _clip_preview, verb="save",
+            edit_fn=_clip_edit, revise_fn=_clip_revise,
+            console=console,
+        ):
+            return
 
         # Save
         save_and_sync(config, db, note, routing=routing)

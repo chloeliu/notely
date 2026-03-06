@@ -326,10 +326,15 @@ def _timer_dispatch(config: NotelyConfig, arg: str) -> None:
                 return
             else:
                 # Multiple matches — show numbered list
-                for i, t in enumerate(matches, 1):
-                    elapsed = elapsed_since(t["start"])
-                    console.print(f"  [{i}] {t['description']} ({t['folder']}) — {elapsed}")
-                choice = Prompt.ask("Which timer to stop?", default="1")
+                from ...prompts import pick_from_list
+                timer_items = [
+                    (t["id"], f"{t['description']} ({t['folder']}) — {elapsed_since(t['start'])}")
+                    for t in matches
+                ]
+                choice = pick_from_list(timer_items, prompt_text="Which timer to stop?")
+                if choice is None:
+                    console.print("[yellow]Cancelled.[/yellow]")
+                    return
                 try:
                     idx = int(choice) - 1
                     target = matches[idx]
@@ -338,10 +343,15 @@ def _timer_dispatch(config: NotelyConfig, arg: str) -> None:
                     return
         else:
             # Multiple running, no hint — show numbered list
-            for i, t in enumerate(running, 1):
-                elapsed = elapsed_since(t["start"])
-                console.print(f"  [{i}] {t['description']} ({t['folder']}) — {elapsed}")
-            choice = Prompt.ask("Which timer to stop?", default="1")
+            from ...prompts import pick_from_list
+            timer_items = [
+                (t["id"], f"{t['description']} ({t['folder']}) — {elapsed_since(t['start'])}")
+                for t in running
+            ]
+            choice = pick_from_list(timer_items, prompt_text="Which timer to stop?")
+            if choice is None:
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
             try:
                 idx = int(choice) - 1
                 target = running[idx]
@@ -575,6 +585,48 @@ output:
 """
 
 
+def _show_secrets(config: NotelyConfig, arg: str) -> None:
+    """View secrets stored in .secrets.toml. Values shown only with service + key."""
+    from ...secrets import SecretsStore
+
+    store = SecretsStore(config.secrets_path)
+    secrets = store.get_all()
+
+    if not secrets:
+        console.print("[dim]No secrets stored. Use |||value||| markers when pasting to capture secrets.[/dim]")
+        return
+
+    parts = arg.strip().split(None, 1) if arg.strip() else []
+
+    if len(parts) == 0:
+        # /secret — list all services and keys (no values)
+        for service in sorted(secrets):
+            keys = sorted(secrets[service])
+            key_list = ", ".join(keys)
+            console.print(f"  [cyan]{service}[/cyan]: {key_list}")
+        return
+
+    service = parts[0]
+    if service not in secrets:
+        console.print(f"[yellow]No secrets for '{service}'. Available: {', '.join(sorted(secrets))}[/yellow]")
+        return
+
+    if len(parts) == 1:
+        # /secret pypi — show keys for that service (no values)
+        for key in sorted(secrets[service]):
+            console.print(f"  [cyan]{service}[/cyan].{key} = ********")
+        return
+
+    # /secret pypi api_token — show the value
+    key = parts[1]
+    value = secrets[service].get(key)
+    if value is None:
+        console.print(f"[yellow]No key '{key}' in {service}. Available: {', '.join(sorted(secrets[service]))}[/yellow]")
+        return
+
+    console.print(f"  [cyan]{service}[/cyan].{key} = {value}")
+
+
 def _handle_workflow(config: NotelyConfig, arg: str) -> None:
     """Handle /workflow commands — delegates to notely-agent."""
     parts = arg.strip().split(None, 1) if arg.strip() else []
@@ -806,8 +858,8 @@ def _delete_note(config: NotelyConfig, note_id: str) -> None:
 
         console.print(f"  [bold]{row['title']}[/bold]")
         console.print(f"  [dim]{row['space']} / {row['date']} / {row['file_path']}[/dim]")
-        choice = Prompt.ask(r"[red]Delete?[/red] \[Y/n]", default="Y")
-        if choice.lower() != "y":
+        from ...prompts import confirm_destructive
+        if not confirm_destructive("Delete this note?"):
             console.print("[dim]Cancelled.[/dim]")
             return
 

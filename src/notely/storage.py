@@ -1151,78 +1151,76 @@ def confirm_and_save_list_items(
     from rich.console import Console
     from rich.prompt import Prompt
 
+    from .prompts import confirm_action
+
     console = Console()
     item_type = result.get("item_type", "todo")
-    items = result.get("items", [])
+    state = {"items": result.get("items", [])}
 
-    if not items:
+    if not state["items"]:
         console.print("[yellow]AI returned no items.[/yellow]")
         return False
 
-    if auto_confirm:
-        _render_list_preview(console, items, item_type)
-    else:
-        while True:
-            _render_list_preview(console, items, item_type)
+    if not auto_confirm:
+        def preview():
+            _render_list_preview(console, state["items"], item_type)
 
+        def edit():
+            edited = _edit_list_items_in_editor(state["items"], item_type)
+            if edited is not None:
+                if not edited:
+                    console.print("[yellow]All items removed. Cancelled.[/yellow]")
+                    state["items"] = []
+                    return
+                state["items"] = edited
+            else:
+                console.print("[dim]No changes made.[/dim]")
+
+        def revise():
             try:
-                choice = Prompt.ask(
-                    r"\[Y]es, save all / \[e]dit / \[r]evise with AI / \[d]rop items / \[n]o, skip",
-                    default="Y",
-                )
+                instruction = Prompt.ask("[dim]What to change[/dim]", default="")
             except (KeyboardInterrupt, EOFError):
-                console.print("\n[yellow]Cancelled.[/yellow]")
-                return False
-
-            ch = choice.lower()
-            if ch in ("y", ""):
-                break
-            elif ch == "n":
-                console.print("[yellow]Cancelled.[/yellow]")
-                return False
-            elif ch == "d":
-                try:
-                    nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
-                except (KeyboardInterrupt, EOFError):
-                    continue
-                if nums.strip():
-                    drop_set = set()
-                    for part in nums.split(","):
-                        try:
-                            drop_set.add(int(part.strip()) - 1)
-                        except ValueError:
-                            pass
-                    items = [it for i, it in enumerate(items) if i not in drop_set]
-                    dropped = len(drop_set & set(range(len(items) + len(drop_set))))
-                    console.print(f"[dim]Dropped {dropped} item(s).[/dim]")
-                    if not items:
-                        console.print("[yellow]All items dropped. Cancelled.[/yellow]")
-                        return False
-            elif ch == "e":
-                edited = _edit_list_items_in_editor(items, item_type)
-                if edited is not None:
-                    if not edited:
-                        console.print("[yellow]All items removed. Cancelled.[/yellow]")
-                        return False
-                    items = edited
+                return
+            if instruction.strip():
+                from .ai import revise_list_items
+                console.print("[dim]Revising...[/dim]")
+                revised = revise_list_items(state["items"], item_type, instruction)
+                if revised:
+                    state["items"] = revised
                 else:
-                    console.print("[dim]No changes made.[/dim]")
-            elif ch == "r":
-                try:
-                    instruction = Prompt.ask("[dim]What to change[/dim]", default="")
-                except (KeyboardInterrupt, EOFError):
-                    continue
-                if instruction.strip():
-                    from .ai import revise_list_items
-                    console.print("[dim]Revising...[/dim]")
-                    revised = revise_list_items(items, item_type, instruction)
-                    if revised:
-                        items = revised
-                    else:
-                        console.print("[yellow]Revision returned no items.[/yellow]")
+                    console.print("[yellow]Revision returned no items.[/yellow]")
+
+        def drop():
+            try:
+                nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
+            except (KeyboardInterrupt, EOFError):
+                return True
+            if nums.strip():
+                drop_set = set()
+                for part in nums.split(","):
+                    try:
+                        drop_set.add(int(part.strip()) - 1)
+                    except ValueError:
+                        pass
+                state["items"] = [it for i, it in enumerate(state["items"]) if i not in drop_set]
+                console.print(f"[dim]Dropped {len(drop_set)} item(s).[/dim]")
+                if not state["items"]:
+                    console.print("[yellow]All items dropped. Cancelled.[/yellow]")
+                    return False
+            return True
+
+        confirmed = confirm_action(
+            preview, verb="save all",
+            edit_fn=edit, revise_fn=revise, drop_fn=drop,
+            console=console,
+        )
+        if not confirmed or not state["items"]:
+            return False
+    else:
+        _render_list_preview(console, state["items"], item_type)
 
     # Save items
-    label = "Todo" if item_type == "todo" else "Idea"
+    items = state["items"]
     if item_type == "todo":
         for item in items:
             item_id = db.add_standalone_action_item(
@@ -1363,75 +1361,74 @@ def confirm_and_save_snippets(
     from rich.console import Console
     from rich.prompt import Prompt
 
+    from .prompts import confirm_action
+
     console = Console()
-    items = data.get("items", [])
-    if not items:
+    state = {"items": data.get("items", [])}
+    if not state["items"]:
         console.print("[yellow]AI returned no snippets.[/yellow]")
         return False
 
-    if auto_confirm:
-        _render_snippet_preview(console, items)
-    else:
-        while True:
-            _render_snippet_preview(console, items)
+    if not auto_confirm:
+        def preview():
+            _render_snippet_preview(console, state["items"])
 
+        def edit():
+            edited = _edit_snippets_in_editor(state["items"])
+            if edited is not None:
+                if not edited:
+                    console.print("[yellow]All items removed. Cancelled.[/yellow]")
+                    state["items"] = []
+                    return
+                state["items"] = edited
+            else:
+                console.print("[dim]No changes made.[/dim]")
+
+        def revise():
             try:
-                choice = Prompt.ask(
-                    r"\[Y]es, save all / \[e]dit / \[r]evise with AI / \[d]rop items / \[n]o, skip",
-                    default="Y",
-                )
+                instruction = Prompt.ask("[dim]What to change[/dim]", default="")
             except (KeyboardInterrupt, EOFError):
-                console.print("\n[yellow]Cancelled.[/yellow]")
-                return False
-
-            ch = choice.lower()
-            if ch in ("y", ""):
-                break
-            elif ch == "n":
-                console.print("[yellow]Cancelled.[/yellow]")
-                return False
-            elif ch == "d":
-                try:
-                    nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
-                except (KeyboardInterrupt, EOFError):
-                    continue
-                if nums.strip():
-                    drop_set = set()
-                    for part in nums.split(","):
-                        try:
-                            drop_set.add(int(part.strip()) - 1)
-                        except ValueError:
-                            pass
-                    items = [it for i, it in enumerate(items) if i not in drop_set]
-                    dropped = len(drop_set & set(range(len(items) + len(drop_set))))
-                    console.print(f"[dim]Dropped {dropped} item(s).[/dim]")
-                    if not items:
-                        console.print("[yellow]All items dropped. Cancelled.[/yellow]")
-                        return False
-            elif ch == "e":
-                edited = _edit_snippets_in_editor(items)
-                if edited is not None:
-                    if not edited:
-                        console.print("[yellow]All items removed. Cancelled.[/yellow]")
-                        return False
-                    items = edited
+                return
+            if instruction.strip():
+                from .ai import revise_list_items
+                console.print("[dim]Revising...[/dim]")
+                revised = revise_list_items(state["items"], "snippet", instruction)
+                if revised:
+                    state["items"] = revised
                 else:
-                    console.print("[dim]No changes made.[/dim]")
-            elif ch == "r":
-                try:
-                    instruction = Prompt.ask("[dim]What to change[/dim]", default="")
-                except (KeyboardInterrupt, EOFError):
-                    continue
-                if instruction.strip():
-                    from .ai import revise_list_items
-                    console.print("[dim]Revising...[/dim]")
-                    revised = revise_list_items(items, "snippet", instruction)
-                    if revised:
-                        items = revised
-                    else:
-                        console.print("[yellow]Revision returned no items.[/yellow]")
+                    console.print("[yellow]Revision returned no items.[/yellow]")
+
+        def drop():
+            try:
+                nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
+            except (KeyboardInterrupt, EOFError):
+                return True
+            if nums.strip():
+                drop_set = set()
+                for part in nums.split(","):
+                    try:
+                        drop_set.add(int(part.strip()) - 1)
+                    except ValueError:
+                        pass
+                state["items"] = [it for i, it in enumerate(state["items"]) if i not in drop_set]
+                console.print(f"[dim]Dropped {len(drop_set)} item(s).[/dim]")
+                if not state["items"]:
+                    console.print("[yellow]All items dropped. Cancelled.[/yellow]")
+                    return False
+            return True
+
+        confirmed = confirm_action(
+            preview, verb="save all",
+            edit_fn=edit, revise_fn=revise, drop_fn=drop,
+            console=console,
+        )
+        if not confirmed or not state["items"]:
+            return False
+    else:
+        _render_snippet_preview(console, state["items"])
 
     # Save items
+    items = state["items"]
     for item in items:
         db.add_reference(
             space=item.get("space") or space,
