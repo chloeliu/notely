@@ -1,0 +1,23 @@
+# Notely configuration
+# Copy to config.toml and customize, or run `notely init` to generate interactively.
+
+user_name = "your-name"
+
+[spaces.work]
+display_name = "Work"
+description = "Meeting notes, project updates, team discussions"
+group_by = "project"
+fields = ["participants", "action_items", "source_ref"]
+
+[spaces.personal]
+display_name = "Personal"
+description = "Ideas, journal entries, life admin"
+group_by = "category"
+fields = []
+
+# Optional: ideas space with content tracking
+# [spaces.ideas]
+# display_name = "Ideas"
+# description = "Product ideas, side projects, things to explore"
+# group_by = "theme"
+# fields = ["content_status"]

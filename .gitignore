@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Testing / linting caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Notely data (user-specific, derived or sensitive)
+.notely/
+.env
+.secrets.toml
+.vectors/
+index.db
+.raw/
+notes/
+attachments/
+agents/
+templates/
+_todos.csv
+_ideas.csv
+_references.csv
+_timelog.csv
+config.toml
+
+# Internal docs (not for public repo)
+CLAUDE.md
+.claude/
