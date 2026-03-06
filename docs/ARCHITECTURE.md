@@ -45,10 +45,10 @@ Notely has three core data types:
 
 ```mermaid
 flowchart TD
-    MD["Markdown files\n(.md files)"]
-    DB["SQLite\n(index.db)"]
-    VEC["LanceDB\n(.vectors/)"]
-    CSV["CSV exports\n(_todos.csv, etc.)"]
+    MD["Markdown files<br/>(.md files)"]
+    DB["SQLite<br/>(index.db)"]
+    VEC["LanceDB<br/>(.vectors/)"]
+    CSV["CSV exports<br/>(_todos.csv, etc.)"]
 
     MD -- "source of truth" --> DB
     DB -- "derived index" --> VEC
@@ -254,11 +254,11 @@ Three layers, checked in order:
 
 ```mermaid
 flowchart TD
-    A["New text pasted"] --> B{"Layer 1: Exact hash\n(SHA256 of full content)"}
+    A["New text pasted"] --> B{"Layer 1: Exact hash<br/>(SHA256 of full content)"}
     B -->|Match| C["Exact duplicate found\nUpdate / New / Skip"]
-    B -->|No match| D{"Layer 2: Snippet hash\n(SHA256 of first 300 chars)"}
+    B -->|No match| D{"Layer 2: Snippet hash<br/>(SHA256 of first 300 chars)"}
     D -->|Match| E["Near-duplicate found\nUpdate / New / Skip"]
-    D -->|No match| F{"Layer 3: Vector search\n(semantic similarity)"}
+    D -->|No match| F{"Layer 3: Vector search<br/>(semantic similarity)"}
     F -->|"dist < 0.4"| G["Similar notes found\nPick one to update / New / Skip"]
     F -->|No match| H["New note\nRoute to folder"]
 

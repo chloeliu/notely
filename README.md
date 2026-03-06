@@ -120,19 +120,25 @@ notely-chat (Acme)> what are the open items for Acme?
 
 ```mermaid
 flowchart TD
-    A["You paste raw text"] --> B["AI structures it"]
-    B --> C{"Duplicate?"}
-    C -->|"Exact or similar match"| D["Merge into existing note"]
-    C -->|"No match"| E["Route to folder"]
-    D --> F["Saved as Markdown"]
-    E --> F
-    F --> G["SQLite index — full-text search"]
-    F --> H["LanceDB vectors — semantic search"]
-    F --> I["CSV exports — todos, references"]
+    A["You paste raw text"] --> B{"AI classifies it"}
+    B -->|"Structured content"| C["Full note<br/>(title, summary, tags, action items)"]
+    B -->|"Quick task or idea"| D["Todo / Idea<br/>(one-liner, optional due date)"]
+    B -->|"Reference data"| E["Snippet<br/>(account number, NPI, URL)"]
+    C --> F{"Duplicate?"}
+    F -->|"Match found"| G["Merge into existing note"]
+    F -->|"No match"| H["Route to folder"]
+    G --> I["Saved as Markdown"]
+    H --> I
+    D --> J["Saved to index"]
+    E --> J
+    I --> K["Indexed + searchable"]
+    J --> K
 
-    style A fill:#f9f9f9,stroke:#333
-    style F fill:#d4edda,stroke:#28a745,stroke-width:2px
+    style B fill:#e3f2fd,stroke:#1976d2
+    style I fill:#d4edda,stroke:#28a745,stroke-width:2px
 ```
+
+The AI decides what your input is — you don't have to. Meeting notes become structured notes with action items. "Call dentist Friday" becomes a todo. An account number becomes a searchable reference snippet.
 
 **Markdown files are the source of truth.** Everything else (search index, vectors, CSV exports) is derived and can be rebuilt with `notely reindex`. You can edit your notes by hand in any text editor — notely respects your changes.
 
@@ -141,12 +147,12 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph Source of Truth
-        MD["Markdown files\nnotes/**/*.md"]
+        MD["Markdown files<br/>notes/**/*.md"]
     end
-    subgraph Derived — rebuildable
-        DB["SQLite + FTS5\nindex.db"]
-        VEC["LanceDB\n.vectors/"]
-        CSV["CSV exports\n_todos.csv"]
+    subgraph Derived - rebuildable
+        DB["SQLite + FTS5<br/>index.db"]
+        VEC["LanceDB<br/>.vectors/"]
+        CSV["CSV exports<br/>_todos.csv"]
     end
 
     MD --> DB --> VEC
@@ -215,13 +221,21 @@ Both paths produce the same markdown files and search index.
 
 ## Key Features
 
-**Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge.
+**Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste an account number or NPI and it stores a searchable reference snippet. You never have to tell it which type — it figures it out.
+
+**Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge the new information in.
+
+**Secret masking** — Wrap sensitive data in `|||secret|||` markers. Before any text is sent to the AI, those values are replaced with `[REDACTED]`. The actual values are stored locally in `.secrets.toml` (gitignored) and restored in the saved note. Your API keys, passwords, and credentials never leave your machine.
+
+```
+You paste:   Login: admin  Password: |||s3cret_pass|||
+AI sees:     Login: admin  Password: [REDACTED]
+Saved note:  Login: admin  Password: s3cret_pass
+```
 
 **Folder routing** — AI figures out where each note belongs based on your workspace structure. You can override, but usually don't need to.
 
 **Action item extraction** — AI pulls out tasks, assigns owners, parses due dates. View them all with `/todo`.
-
-**Secret masking** — Wrap sensitive data in `|||secret|||` markers. Values are redacted before any API call and stored locally.
 
 **File attachments** — Drag or paste file paths. Supports text, PDF (with table extraction), and images (described via Vision API).
 
