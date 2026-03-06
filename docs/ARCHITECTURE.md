@@ -236,6 +236,25 @@ db.search(query, filters=SearchFilters(space="clients", folder="sanity"))
 # json_extract(space_metadata, '$.project') — often empty
 ```
 
+### Routing folder input
+
+At any routing prompt (numbered choices), users can also type a folder path directly instead of picking a number:
+
+- **Existing folder** — matches by full path (`clients/acme`), slug (`acme`), or display name (`Acme Corp`)
+- **New folder** — `clients/newproject` creates the folder immediately (mkdir + DB + vectors), so it persists even if the user cancels the note
+
+The `_resolve_folder_text()` function in `routing.py` handles this resolution. It's used by both the inline typing at routing prompts and the dedicated `_prompt_folder_with_autocomplete()` prompt (which adds tab completion).
+
+### Folder autocomplete
+
+The routing autocomplete (`_FolderCompleter` in `routing.py`) uses hierarchical drill-down:
+
+- **Empty tab** → shows all config spaces (not just spaces with existing folders)
+- **`clients/` + tab** → shows existing groups under that space
+- **`pro` + tab** → fuzzy-matches both space names and existing folder paths
+
+New folders are created eagerly (on the filesystem + in DB) at routing time, not deferred to save time. Empty folders from cancelled notes are fine — they show up in autocomplete for next time and can be cleaned up with `/rmdir`.
+
 ### Shared folder utilities
 
 ```python

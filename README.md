@@ -264,7 +264,7 @@ AI sees:     Login: admin  Password: [REDACTED]
 Saved note:  Login: admin  Password: s3cret_pass
 ```
 
-**Folder routing** — AI figures out where each note belongs based on your workspace structure. You can override, but usually don't need to.
+**Folder routing** — AI figures out where each note belongs based on your workspace structure. At any routing prompt, you can type a folder path directly (e.g. `clients/acme`) instead of picking a number — notely resolves it or creates the folder on the spot.
 
 **Action item extraction** — AI pulls out tasks, assigns owners, parses due dates. View them all with `/todo`.
 

@@ -339,12 +339,17 @@ def present_matches(
         console.print(f"  [{n + 1}] New note")
         console.print(f"  [{n + 2}] Somewhere else")
         console.print(f"  [{n + 3}] Skip")
+        console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
 
         choice = Prompt.ask("Choice", default=str(n + 1))
         try:
             idx = int(choice) - 1
         except ValueError:
-            idx = n  # treat invalid as "new note"
+            # Not a number — try to resolve as folder path
+            resolved = _resolve_folder_text(config, choice, ask_space=False)
+            if resolved:
+                return resolved
+            return _prompt_folder_with_autocomplete(config)
 
         if idx == n + 2:
             return None  # skip
@@ -370,12 +375,17 @@ def present_matches(
         n = len(top_dirs)
         console.print(f"  [{n + 1}] Somewhere else")
         console.print(f"  [{n + 2}] Skip")
+        console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
 
         choice = Prompt.ask("Choice (default 1)", default="1")
         try:
             idx = int(choice) - 1
         except ValueError:
-            return None
+            # Not a number — try to resolve as folder path
+            resolved = _resolve_folder_text(config, choice, ask_space=False)
+            if resolved:
+                return resolved
+            return _prompt_folder_with_autocomplete(config)
 
         if idx == n + 1:
             return None  # skip
@@ -428,12 +438,17 @@ def present_matches(
 
     console.print(f"  [{i}] [dim]New location...[/dim]")
     console.print(f"  [{i + 1}] [dim]Cancel[/dim]")
+    console.print("[dim]  Or type a folder path (e.g. clients/acme)[/dim]")
 
     choice = Prompt.ask(f"Choice (default 1)", default="1")
     try:
         picked = int(choice)
     except ValueError:
-        return None
+        # Not a number — try to resolve as folder path
+        resolved = _resolve_folder_text(config, choice, ask_space=False)
+        if resolved:
+            return resolved
+        return _prompt_folder_with_autocomplete(config)
 
     if picked == i:
         return _prompt_folder_with_autocomplete(config)
@@ -777,13 +792,160 @@ def _handle_note_pick(
     return _BACK
 
 
+def _resolve_folder_text(
+    config: NotelyConfig,
+    text: str,
+    all_dirs: list[dict] | None = None,
+    ask_space: bool = True,
+) -> RoutingDecision | None:
+    """Resolve free-text input to a RoutingDecision.
+
+    Matches existing folders by full path, slug, or display name.
+    If no match, treats as new folder creation (space/name or bare name).
+    When ask_space=False, uses first space for bare names instead of prompting.
+    """
+    from slugify import slugify
+
+    text = text.strip()
+    if not text:
+        return None
+
+    if all_dirs is None:
+        try:
+            with Database(config.db_path) as db:
+                db.initialize()
+                all_dirs = db.get_all_directories()
+        except Exception:
+            all_dirs = []
+
+    # Build folder list from dirs
+    folders: list[tuple[str, str, str, str, str | None]] = []
+    seen: set[str] = set()
+    for d in all_dirs:
+        slug = d.get("group_slug", "")
+        if not slug:
+            continue
+        space = d["space"]
+        sub = d.get("subgroup_slug")
+        fp = f"{space}/{slug}/{sub}" if sub else f"{space}/{slug}"
+        if fp in seen:
+            continue
+        seen.add(fp)
+        folders.append((fp, d.get("display_name", slug), space, slug, sub))
+
+    # Try to match an existing folder
+    text_lower = text.lower()
+    for fp, display, space, slug, sub in folders:
+        if text_lower == fp.lower() or text_lower == display.lower() or text_lower == slug.lower():
+            if sub:
+                group_display = slug
+                for d in all_dirs:
+                    if d["space"] == space and d["group_slug"] == slug and not d.get("subgroup_slug"):
+                        group_display = d["display_name"]
+                        break
+                return RoutingDecision(
+                    space=space,
+                    group_slug=slug,
+                    group_display=group_display,
+                    group_is_new=False,
+                    subgroup_slug=sub,
+                    subgroup_display=display,
+                )
+            return RoutingDecision(
+                space=space,
+                group_slug=slug,
+                group_display=display,
+                group_is_new=False,
+            )
+
+    # No match — treat as new folder creation
+    space_names = config.space_names()
+    if "/" in text:
+        parts = text.split("/", 1)
+        space = parts[0]
+        group_display = parts[1].strip()
+        if not group_display:
+            return None
+        if space not in space_names:
+            for sn in space_names:
+                sc = config.get_space(sn)
+                if sc and sc.display_name.lower() == space.lower():
+                    space = sn
+                    break
+            else:
+                console.print(f"[yellow]Unknown space: {space}[/yellow]")
+                return None
+    else:
+        group_display = text
+        if len(space_names) == 1:
+            space = space_names[0]
+        elif not ask_space:
+            space = space_names[0]
+        else:
+            console.print("\n[bold]Which space?[/bold]")
+            for i, name in enumerate(space_names, 1):
+                sc = config.get_space(name)
+                desc = f" -- {sc.description}" if sc and sc.description else ""
+                console.print(f"  [{i}] {sc.display_name if sc else name}{desc}")
+            choice = Prompt.ask("Space", default="1")
+            try:
+                idx = int(choice) - 1
+                space = space_names[idx]
+            except (ValueError, IndexError):
+                if choice in space_names:
+                    space = choice
+                else:
+                    console.print("[yellow]Invalid choice.[/yellow]")
+                    return None
+
+    group_slug = slugify(group_display)
+    group_is_new = not config.group_dir(space, group_slug).exists()
+
+    if group_is_new:
+        # Create directory eagerly so it persists even if the user Ctrl+C's
+        config.group_dir(space, group_slug).mkdir(parents=True, exist_ok=True)
+        display_name = group_display.replace("-", " ").title() if group_display == group_slug else group_display
+        dir_id = f"{space}/{group_slug}"
+        try:
+            with Database(config.db_path) as db:
+                db.initialize()
+                db.upsert_directory(
+                    dir_id=dir_id,
+                    space=space,
+                    group_slug=group_slug,
+                    display_name=display_name,
+                    description="",
+                )
+        except Exception:
+            logger.debug("Failed to register new directory in DB", exc_info=True)
+        try:
+            from .vectors import try_vector_sync_directory
+            try_vector_sync_directory(
+                config,
+                dir_id=dir_id,
+                space=space,
+                group_slug=group_slug,
+                display_name=display_name,
+                description="",
+            )
+        except Exception:
+            pass
+        console.print(f"[dim]Created folder: {space}/{group_slug}[/dim]")
+
+    return RoutingDecision(
+        space=space,
+        group_slug=group_slug,
+        group_display=group_display,
+        group_is_new=group_is_new,
+    )
+
+
 def _prompt_folder_with_autocomplete(
     config: NotelyConfig,
 ) -> RoutingDecision | None:
     """Single prompt with tab autocomplete across all folders. Handles new folders too."""
     from prompt_toolkit import prompt as pt_prompt
     from prompt_toolkit.completion import Completer, Completion
-    from slugify import slugify
 
     # Load all directories
     try:
@@ -812,32 +974,63 @@ def _prompt_folder_with_autocomplete(
         seen.add(full_path)
         folders.append((full_path, d.get("display_name", slug), space, slug, sub))
 
+    space_names = config.space_names()
+
     class _FolderCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor.lower()
+            cursor_len = len(document.text_before_cursor)
+
             if not text:
-                # Show spaces as starting points
-                shown_spaces = set()
-                for fp, display, space, _, _ in folders:
-                    if space not in shown_spaces:
-                        shown_spaces.add(space)
-                        sc = config.get_space(space)
-                        label = f"{space}/"
-                        yield Completion(
-                            label,
-                            start_position=-len(document.text_before_cursor),
-                            display_meta=sc.display_name if sc else space,
-                        )
-                return
-            for fp, display, space, slug, sub in folders:
-                if (text in fp.lower()
-                        or text in slug.lower()
-                        or text in display.lower()):
+                # Empty → show all config spaces as starting points
+                for sn in space_names:
+                    sc = config.get_space(sn)
                     yield Completion(
-                        fp,
-                        start_position=-len(document.text_before_cursor),
-                        display_meta=display,
+                        f"{sn}/",
+                        start_position=-cursor_len,
+                        display_meta=sc.display_name if sc else sn,
                     )
+                return
+
+            if "/" in text:
+                # Has slash → prefix match for drill-down
+                for fp, display, space, slug, sub in folders:
+                    if fp.lower().startswith(text) and fp.lower() != text.rstrip("/"):
+                        yield Completion(
+                            fp,
+                            start_position=-cursor_len,
+                            display_meta=display,
+                        )
+                # Also show space names that match the prefix (for spaces without groups yet)
+                prefix = text.rstrip("/")
+                for sn in space_names:
+                    if sn.lower() == prefix and not any(
+                        fp.lower().startswith(text) for fp, *_ in folders
+                    ):
+                        # Space exists but has no groups — offer the space itself
+                        sc = config.get_space(sn)
+                        yield Completion(
+                            sn,
+                            start_position=-cursor_len,
+                            display_meta=sc.display_name if sc else sn,
+                        )
+            else:
+                # No slash → fuzzy match spaces + existing folders
+                for sn in space_names:
+                    if text in sn.lower():
+                        sc = config.get_space(sn)
+                        yield Completion(
+                            f"{sn}/",
+                            start_position=-cursor_len,
+                            display_meta=sc.display_name if sc else sn,
+                        )
+                for fp, display, space, slug, sub in folders:
+                    if text in slug.lower() or text in display.lower():
+                        yield Completion(
+                            fp,
+                            start_position=-cursor_len,
+                            display_meta=display,
+                        )
 
     console.print(
         "[dim]Type a folder path (tab to complete) or a new name to create.[/dim]"
@@ -847,86 +1040,7 @@ def _prompt_folder_with_autocomplete(
     except (KeyboardInterrupt, EOFError):
         return None
 
-    result = result.strip()
-    if not result:
-        return None
-
-    # Try to match an existing folder
-    result_lower = result.lower()
-    for fp, display, space, slug, sub in folders:
-        if result_lower == fp.lower() or result_lower == display.lower():
-            group_is_new = False
-            subgroup_slug = sub
-            subgroup_display = display if sub else None
-            if sub:
-                # Find group display
-                group_display = slug
-                for d in all_dirs:
-                    if d["space"] == space and d["group_slug"] == slug and not d.get("subgroup_slug"):
-                        group_display = d["display_name"]
-                        break
-            else:
-                group_display = display
-            return RoutingDecision(
-                space=space,
-                group_slug=slug,
-                group_display=group_display,
-                group_is_new=False,
-                subgroup_slug=subgroup_slug,
-                subgroup_display=subgroup_display,
-            )
-
-    # No match — treat as new folder creation
-    # Parse: "space/group" or just "group"
-    space_names = config.space_names()
-    if "/" in result:
-        parts = result.split("/", 1)
-        space = parts[0]
-        group_display = parts[1]
-        if space not in space_names:
-            # Maybe it's display/group — try matching space display names
-            for sn in space_names:
-                sc = config.get_space(sn)
-                if sc and sc.display_name.lower() == space.lower():
-                    space = sn
-                    break
-            else:
-                console.print(f"[yellow]Unknown space: {space}[/yellow]")
-                return None
-    else:
-        # No space specified — use first space or ask
-        group_display = result
-        if len(space_names) == 1:
-            space = space_names[0]
-        else:
-            console.print("\n[bold]Which space?[/bold]")
-            for i, name in enumerate(space_names, 1):
-                sc = config.get_space(name)
-                desc = f" -- {sc.description}" if sc and sc.description else ""
-                console.print(f"  [{i}] {sc.display_name if sc else name}{desc}")
-            choice = Prompt.ask("Space", default="1")
-            try:
-                idx = int(choice) - 1
-                space = space_names[idx]
-            except (ValueError, IndexError):
-                if choice in space_names:
-                    space = choice
-                else:
-                    console.print("[yellow]Invalid choice.[/yellow]")
-                    return None
-
-    group_slug = slugify(group_display)
-    group_is_new = not config.group_dir(space, group_slug).exists()
-
-    if group_is_new:
-        console.print(f"[dim]Creating new folder: {space}/{group_slug}[/dim]")
-
-    return RoutingDecision(
-        space=space,
-        group_slug=group_slug,
-        group_display=group_display,
-        group_is_new=group_is_new,
-    )
+    return _resolve_folder_text(config, result, all_dirs=all_dirs)
 
 
 def ask_routing_manually(

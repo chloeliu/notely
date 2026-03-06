@@ -993,6 +993,70 @@ Preserve [REDACTED_N] placeholders exactly as-is."""
     raise ValueError("AI did not return revised output via tool_use")
 
 
+def revise_list_items(
+    items: list[dict],
+    item_type: str,
+    instruction: str,
+) -> list[dict]:
+    """Revise a batch of list items (todos/ideas) or snippets based on user instruction.
+
+    Sends the current items plus the user's instruction to the AI, which
+    returns a revised items array using the same tool schema.
+
+    Args:
+        items: Current list of item dicts.
+        item_type: "todo", "idea", or "snippet".
+        instruction: User's description of what to change.
+
+    Returns:
+        Revised items list, or the original items if AI fails.
+    """
+    import yaml
+
+    client = anthropic.Anthropic()
+
+    items_yaml = yaml.dump(items, default_flow_style=False, allow_unicode=True)
+
+    if item_type == "snippet":
+        tool = ADD_SNIPPET_TOOL
+        tool_name = "add_snippet"
+    else:
+        tool = ADD_LIST_ITEM_TOOL
+        tool_name = "add_list_item"
+
+    system = f"""You are a note assistant. The user has a batch of {item_type} items they want revised.
+
+Current items:
+```yaml
+{items_yaml}
+```
+
+Apply the user's requested changes and return the revised items using the {tool_name} tool.
+Keep items the user didn't ask to change. You may add, remove, or modify items as requested."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=2048,
+            system=system,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": tool_name},
+            messages=[{"role": "user", "content": instruction}],
+        )
+
+        for block in response.content:
+            if block.type == "tool_use" and block.name == tool_name:
+                data = block.input
+                if item_type == "snippet":
+                    return data.get("items", items)
+                else:
+                    return data.get("items", items)
+    except Exception as e:
+        logger.warning("AI revision failed: %s", e)
+
+    return items
+
+
 def _parse_structure_only_output(data: dict[str, Any]) -> AIStructuredOutput:
     """Parse the structure_note tool output into AIStructuredOutput.
 

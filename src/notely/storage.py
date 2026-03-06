@@ -1012,34 +1012,13 @@ def handle_todo_dedup(
     return merged_any
 
 
-def confirm_and_save_list_items(
-    config: NotelyConfig,
-    db: "Database",
-    result: dict,
-    auto_confirm: bool = False,
-) -> bool:
-    """Preview list items (todos/ideas) and save after user confirmation.
-
-    Args:
-        config: workspace config
-        db: initialized Database instance
-        result: dict with "item_type" ("todo"/"idea") and "items" list
-        auto_confirm: skip the confirmation prompt (for --yes flag)
-
-    Returns:
-        True if items were saved, False if cancelled or empty.
-    """
-    from rich.console import Console
+def _render_list_preview(
+    console: Any,
+    items: list[dict],
+    item_type: str,
+) -> None:
+    """Render a preview panel for list items (todos or ideas)."""
     from rich.panel import Panel
-    from rich.prompt import Prompt
-
-    console = Console()
-    item_type = result.get("item_type", "todo")
-    items = result.get("items", [])
-
-    if not items:
-        console.print("[yellow]AI returned no items.[/yellow]")
-        return False
 
     label = "Todo" if item_type == "todo" else "Idea"
     lines = [f"[bold]Adding {len(items)} {label}(s):[/bold]", ""]
@@ -1047,12 +1026,12 @@ def confirm_and_save_list_items(
     for i, item in enumerate(items, 1):
         if item_type == "todo":
             owner = item.get("owner", "me")
-            due = f" (due {item['due']})" if item.get("due") else ""
+            due = f" · due {item['due']}" if item.get("due") else ""
             context = ""
             if item.get("space") or item.get("group"):
                 parts = [p for p in [item.get("space"), item.get("group")] if p]
                 context = f" [dim][{' / '.join(parts)}][/dim]"
-            lines.append(f"  {i}. [cyan]{owner}[/cyan]: {item['text']}{due}{context}")
+            lines.append(f"  {i}. {item['text']}    [cyan]{owner}[/cyan]{due}{context}")
         else:
             tags = ", ".join(item.get("tags", []))
             cat = f" [dim]({item['group']})[/dim]" if item.get("group") else ""
@@ -1064,35 +1043,295 @@ def confirm_and_save_list_items(
 
     console.print(Panel("\n".join(lines), title=f"Quick {label}s", border_style="blue"))
 
-    if not auto_confirm:
-        choice = Prompt.ask(r"\[Y]es, add / \[n]o, cancel", default="Y")
-        if choice.lower() == "n":
-            console.print("[yellow]Cancelled.[/yellow]")
-            return False
 
+def _edit_list_items_in_editor(
+    items: list[dict],
+    item_type: str,
+) -> list[dict] | None:
+    """Open list items in $EDITOR as YAML. Returns updated items or None if cancelled."""
+    import os
+    import subprocess
+    import tempfile
+
+    import yaml
+
+    # Build editable YAML
+    if item_type == "todo":
+        editable = []
+        for item in items:
+            entry: dict[str, Any] = {"task": item.get("text", item.get("task", ""))}
+            if item.get("owner"):
+                entry["owner"] = item["owner"]
+            if item.get("due"):
+                entry["due"] = item["due"]
+            editable.append(entry)
+    else:
+        editable = []
+        for item in items:
+            entry = {"text": item.get("text", "")}
+            if item.get("tags"):
+                entry["tags"] = item["tags"]
+            if item.get("summary"):
+                entry["summary"] = item["summary"]
+            editable.append(entry)
+
+    header = f"# Edit {item_type}s. Delete entries to remove. Save and close.\n"
+    content = header + yaml.dump(editable, default_flow_style=False, allow_unicode=True)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=f"_notely_{item_type}s.yaml", prefix="notely_",
+        delete=False, encoding="utf-8",
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        editor = os.environ.get("EDITOR", "vi")
+        mtime_before = os.path.getmtime(tmp_path)
+        subprocess.run([editor, tmp_path])
+        mtime_after = os.path.getmtime(tmp_path)
+
+        if mtime_after == mtime_before:
+            return None  # No changes
+
+        edited_text = Path(tmp_path).read_text(encoding="utf-8")
+        # Strip comment header
+        lines = edited_text.splitlines()
+        body_lines = [l for l in lines if not l.strip().startswith("#")]
+        body = "\n".join(body_lines).strip()
+        if not body:
+            return []
+
+        parsed = yaml.safe_load(body)
+        if not isinstance(parsed, list):
+            return None
+
+        # Map back to the expected item format
+        result = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            if item_type == "todo":
+                result.append({
+                    "text": entry.get("task", entry.get("text", "")),
+                    "owner": entry.get("owner", "me"),
+                    "due": entry.get("due"),
+                })
+            else:
+                result.append({
+                    "text": entry.get("text", ""),
+                    "tags": entry.get("tags", []),
+                    "summary": entry.get("summary"),
+                })
+        return result
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def confirm_and_save_list_items(
+    config: NotelyConfig,
+    db: "Database",
+    result: dict,
+    auto_confirm: bool = False,
+) -> bool:
+    """Preview list items (todos/ideas) and save after user confirmation.
+
+    Supports editing in $EDITOR, AI revision, and dropping specific items
+    before saving — matching the note preview UX.
+
+    Args:
+        config: workspace config
+        db: initialized Database instance
+        result: dict with "item_type" ("todo"/"idea") and "items" list
+        auto_confirm: skip the confirmation prompt (for --yes flag)
+
+    Returns:
+        True if items were saved, False if cancelled or empty.
+    """
+    from rich.console import Console
+    from rich.prompt import Prompt
+
+    console = Console()
+    item_type = result.get("item_type", "todo")
+    items = result.get("items", [])
+
+    if not items:
+        console.print("[yellow]AI returned no items.[/yellow]")
+        return False
+
+    if auto_confirm:
+        _render_list_preview(console, items, item_type)
+    else:
+        while True:
+            _render_list_preview(console, items, item_type)
+
+            try:
+                choice = Prompt.ask(
+                    r"\[Y]es, save all / \[e]dit / \[r]evise with AI / \[d]rop items / \[n]o, skip",
+                    default="Y",
+                )
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[yellow]Cancelled.[/yellow]")
+                return False
+
+            ch = choice.lower()
+            if ch in ("y", ""):
+                break
+            elif ch == "n":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return False
+            elif ch == "d":
+                try:
+                    nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
+                except (KeyboardInterrupt, EOFError):
+                    continue
+                if nums.strip():
+                    drop_set = set()
+                    for part in nums.split(","):
+                        try:
+                            drop_set.add(int(part.strip()) - 1)
+                        except ValueError:
+                            pass
+                    items = [it for i, it in enumerate(items) if i not in drop_set]
+                    dropped = len(drop_set & set(range(len(items) + len(drop_set))))
+                    console.print(f"[dim]Dropped {dropped} item(s).[/dim]")
+                    if not items:
+                        console.print("[yellow]All items dropped. Cancelled.[/yellow]")
+                        return False
+            elif ch == "e":
+                edited = _edit_list_items_in_editor(items, item_type)
+                if edited is not None:
+                    if not edited:
+                        console.print("[yellow]All items removed. Cancelled.[/yellow]")
+                        return False
+                    items = edited
+                else:
+                    console.print("[dim]No changes made.[/dim]")
+            elif ch == "r":
+                try:
+                    instruction = Prompt.ask("[dim]What to change[/dim]", default="")
+                except (KeyboardInterrupt, EOFError):
+                    continue
+                if instruction.strip():
+                    from .ai import revise_list_items
+                    console.print("[dim]Revising...[/dim]")
+                    revised = revise_list_items(items, item_type, instruction)
+                    if revised:
+                        items = revised
+                    else:
+                        console.print("[yellow]Revision returned no items.[/yellow]")
+
+    # Save items
+    label = "Todo" if item_type == "todo" else "Idea"
     if item_type == "todo":
         for item in items:
             item_id = db.add_standalone_action_item(
                 owner=item.get("owner", "me"),
-                task=item["text"],
+                task=item.get("text", item.get("task", "")),
                 due=item.get("due"),
                 space=item.get("space"),
                 group_name=item.get("group"),
             )
-            console.print(f"  [green]Added todo #{item_id}:[/green] {item['text']}")
+            console.print(f"  [green]Added todo #{item_id}:[/green] {item.get('text', item.get('task', ''))}")
         sync_todo_index(config, db)
     else:
         for item in items:
             note_id = db.add_standalone_idea(
-                title=item["text"],
-                summary=item.get("summary") or item["text"],
+                title=item.get("text", ""),
+                summary=item.get("summary") or item.get("text", ""),
                 category=item.get("group"),
                 tags=item.get("tags"),
             )
-            console.print(f"  [green]Added idea {note_id}:[/green] {item['text']}")
+            console.print(f"  [green]Added idea {note_id}:[/green] {item.get('text', '')}")
         sync_ideas_index(config, db)
 
     return True
+
+
+def _render_snippet_preview(
+    console: Any,
+    items: list[dict],
+) -> None:
+    """Render a preview panel for snippet items."""
+    from rich.panel import Panel
+
+    lines = [f"[bold]Saving {len(items)} snippet(s):[/bold]", ""]
+    for i, item in enumerate(items, 1):
+        stype = item.get("snippet_type", "fact")
+        desc = f" — {item['description']}" if item.get("description") else ""
+        lines.append(
+            f"  {i}. [cyan]{item['entity']}[/cyan].{item['key']}"
+            f" = {item['value']} [dim]({stype}){desc}[/dim]"
+        )
+    console.print(Panel("\n".join(lines), title="Quick Snippets", border_style="blue"))
+
+
+def _edit_snippets_in_editor(
+    items: list[dict],
+) -> list[dict] | None:
+    """Open snippets in $EDITOR as YAML. Returns updated items or None if cancelled."""
+    import os
+    import subprocess
+    import tempfile
+
+    import yaml
+
+    editable = []
+    for item in items:
+        entry: dict[str, Any] = {
+            "entity": item.get("entity", ""),
+            "key": item.get("key", ""),
+            "value": item.get("value", ""),
+            "type": item.get("snippet_type", "fact"),
+        }
+        if item.get("description"):
+            entry["description"] = item["description"]
+        editable.append(entry)
+
+    header = "# Edit snippets. Delete entries to remove. Save and close.\n"
+    content = header + yaml.dump(editable, default_flow_style=False, allow_unicode=True)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix="_notely_snippets.yaml", prefix="notely_",
+        delete=False, encoding="utf-8",
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        editor = os.environ.get("EDITOR", "vi")
+        mtime_before = os.path.getmtime(tmp_path)
+        subprocess.run([editor, tmp_path])
+        mtime_after = os.path.getmtime(tmp_path)
+
+        if mtime_after == mtime_before:
+            return None  # No changes
+
+        edited_text = Path(tmp_path).read_text(encoding="utf-8")
+        lines = edited_text.splitlines()
+        body_lines = [l for l in lines if not l.strip().startswith("#")]
+        body = "\n".join(body_lines).strip()
+        if not body:
+            return []
+
+        parsed = yaml.safe_load(body)
+        if not isinstance(parsed, list):
+            return None
+
+        result = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            result.append({
+                "entity": entry.get("entity", ""),
+                "key": entry.get("key", ""),
+                "value": str(entry.get("value", "")),
+                "snippet_type": entry.get("type", entry.get("snippet_type", "fact")),
+                "description": entry.get("description", ""),
+            })
+        return result
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 def confirm_and_save_snippets(
@@ -1104,6 +1343,9 @@ def confirm_and_save_snippets(
     auto_confirm: bool = False,
 ) -> bool:
     """Preview snippet items and save to DB after user confirmation.
+
+    Supports editing in $EDITOR, AI revision, and dropping specific items
+    before saving — matching the note preview UX.
 
     Per-item ``space`` and ``group`` fields override the caller-level defaults.
 
@@ -1119,7 +1361,6 @@ def confirm_and_save_snippets(
         True if snippets were saved, False if cancelled or empty.
     """
     from rich.console import Console
-    from rich.panel import Panel
     from rich.prompt import Prompt
 
     console = Console()
@@ -1128,23 +1369,69 @@ def confirm_and_save_snippets(
         console.print("[yellow]AI returned no snippets.[/yellow]")
         return False
 
-    # Preview
-    lines = [f"[bold]Saving {len(items)} snippet(s):[/bold]", ""]
-    for item in items:
-        stype = item.get("snippet_type", "fact")
-        desc = f" — {item['description']}" if item.get("description") else ""
-        lines.append(
-            f"  [{stype}] [cyan]{item['entity']}[/cyan].{item['key']}"
-            f" = {item['value']} [dim]({stype}){desc}[/dim]"
-        )
-    console.print(Panel("\n".join(lines), title="Quick Snippets", border_style="blue"))
+    if auto_confirm:
+        _render_snippet_preview(console, items)
+    else:
+        while True:
+            _render_snippet_preview(console, items)
 
-    if not auto_confirm:
-        choice = Prompt.ask(r"\[Y]es, save / \[n]o, cancel", default="Y")
-        if choice.lower() == "n":
-            console.print("[yellow]Cancelled.[/yellow]")
-            return False
+            try:
+                choice = Prompt.ask(
+                    r"\[Y]es, save all / \[e]dit / \[r]evise with AI / \[d]rop items / \[n]o, skip",
+                    default="Y",
+                )
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[yellow]Cancelled.[/yellow]")
+                return False
 
+            ch = choice.lower()
+            if ch in ("y", ""):
+                break
+            elif ch == "n":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return False
+            elif ch == "d":
+                try:
+                    nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
+                except (KeyboardInterrupt, EOFError):
+                    continue
+                if nums.strip():
+                    drop_set = set()
+                    for part in nums.split(","):
+                        try:
+                            drop_set.add(int(part.strip()) - 1)
+                        except ValueError:
+                            pass
+                    items = [it for i, it in enumerate(items) if i not in drop_set]
+                    dropped = len(drop_set & set(range(len(items) + len(drop_set))))
+                    console.print(f"[dim]Dropped {dropped} item(s).[/dim]")
+                    if not items:
+                        console.print("[yellow]All items dropped. Cancelled.[/yellow]")
+                        return False
+            elif ch == "e":
+                edited = _edit_snippets_in_editor(items)
+                if edited is not None:
+                    if not edited:
+                        console.print("[yellow]All items removed. Cancelled.[/yellow]")
+                        return False
+                    items = edited
+                else:
+                    console.print("[dim]No changes made.[/dim]")
+            elif ch == "r":
+                try:
+                    instruction = Prompt.ask("[dim]What to change[/dim]", default="")
+                except (KeyboardInterrupt, EOFError):
+                    continue
+                if instruction.strip():
+                    from .ai import revise_list_items
+                    console.print("[dim]Revising...[/dim]")
+                    revised = revise_list_items(items, "snippet", instruction)
+                    if revised:
+                        items = revised
+                    else:
+                        console.print("[yellow]Revision returned no items.[/yellow]")
+
+    # Save items
     for item in items:
         db.add_reference(
             space=item.get("space") or space,
