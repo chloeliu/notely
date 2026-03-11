@@ -154,7 +154,7 @@ flowchart TD
     A["You paste raw text"] --> B{"AI classifies it<br/>and files it"}
     B -->|"Structured content"| C["Full note<br/>(title, summary, tags,<br/>action items)"]
     B -->|"Quick task or idea"| D["Todo or Idea<br/>(one-liner, due date)"]
-    B -->|"Reference data"| E["Snippet<br/>(account number, NPI, URL)"]
+    B -->|"Reference data"| E["Database record<br/>(contact, NPI, account)"]
     C --> F{"Duplicate?"}
     F -->|"Match found"| G["Merge into<br/>existing note"]
     F -->|"No match"| H["Route to folder"]
@@ -169,7 +169,7 @@ flowchart TD
     style I fill:#d4edda,stroke:#28a745,stroke-width:2px
 ```
 
-The AI decides what your input is and files it in the right place — you never have to. Meeting notes become structured notes with action items, filed into the right client folder. "Call dentist Friday" becomes a todo. An account number becomes a searchable reference snippet. Duplicates are caught automatically before anything is saved.
+The AI decides what your input is and files it in the right place — you never have to. Meeting notes become structured notes with action items and database records extracted in the same call, filed into the right client folder. "Call dentist Friday" becomes a todo. An account number becomes a searchable database record. Duplicates are caught automatically before anything is saved.
 
 **Markdown files are the source of truth.** Everything else (search index, vectors, CSV exports) is derived and can be rebuilt with `notely reindex`. You can edit your notes by hand in any text editor — notely respects your changes.
 
@@ -183,7 +183,7 @@ flowchart LR
     subgraph Derived - rebuildable
         DB["SQLite + FTS5<br/>index.db"]
         VEC["LanceDB<br/>.vectors/"]
-        CSV["CSV exports<br/>_todos.csv"]
+        CSV["CSV exports<br/>_todos.csv, _contacts.csv, ..."]
     end
 
     MD --> DB --> VEC
@@ -246,18 +246,20 @@ Both paths produce the same markdown files and search index.
 | `/chat <folder>` | AI chat scoped to a folder's notes |
 | `/timer <folder> <desc>` | Time tracking |
 | `/clip <url>` | Save a web page as a note |
-| `/ref` | View/search reference data (account numbers, NPIs, etc.) |
+| `/<db_name>` | Enter database interactive mode — add, update, delete, browse records |
 | `/secret` | View stored secrets (`/secret service key` to reveal a value) |
 | `/folder <name>` | Set a working folder for the session |
 | `/edit <id>` | Edit a note in your editor |
 
 ## Key Features
 
-**Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste an account number or NPI and it stores a searchable reference snippet. You never have to tell it which type — it figures it out.
+**Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste an account number or NPI and it stores a searchable database record. You never have to tell it which type — it figures it out.
+
+**Databases** — Notely has a built-in lightweight database system for structured records. Todos, contacts, providers, plain facts — each is a "database" you can query, browse, and export. The AI extracts records inline when structuring notes (one call produces both the note and its todos/contacts). Type `/<name>` (e.g. `/contacts`, `/todo`) to enter interactive mode. Create new databases on the fly — just paste data and notely walks you through setup (name, fields, auto-extract from future notes). Each database gets its own CSV export and full-text search.
 
 **Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge the new information in.
 
-**Secret masking** — Wrap sensitive data in `|||secret|||` markers. The values are replaced with `[REDACTED]` before any text is sent to the AI. If the AI classifies the input as reference data (account number, API token), it's saved to `.secrets.toml` with proper naming — not as a visible snippet. Your secrets never leave your machine.
+**Secret masking** — Wrap sensitive data in `|||secret|||` markers. The values are replaced with `[REDACTED]` before any text is sent to the AI. Secrets are stored in `.secrets.toml` — a local file, completely separate from the database system. Your secrets never leave your machine.
 
 ```
 You paste:   pypi token |||pypi-AgEIcHl...|||
@@ -268,8 +270,6 @@ Saved to:    .secrets.toml → [pypi] api_token = "pypi-AgEIcHl..."
 Retrieve secrets with `/secret` inside `notely open` — tab-completes service and key names, only shows values when you specify both.
 
 **Folder routing** — AI figures out where each note belongs based on your workspace structure. At any routing prompt, you can type a folder path directly (e.g. `clients/acme`) instead of picking a number — notely resolves it or creates the folder on the spot.
-
-**Action item extraction** — AI pulls out tasks, assigns owners, parses due dates. View them all with `/todo`.
 
 **Web clipping** — `/clip <url>` saves any web page as a structured note. Requires the optional Firecrawl dependency (`pip install "notely[web]"`) and a [Firecrawl API key](https://firecrawl.dev).
 
@@ -290,6 +290,7 @@ my-workspace/
 │   └── personal/
 ├── index.db            # Search index (auto-generated)
 ├── _todos.csv          # Todo list (auto-generated)
+├── _contacts.csv       # Per-database CSV exports (auto-generated)
 └── .env                # Your API key (gitignored)
 ```
 
@@ -302,7 +303,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and PR guidelines. Se
 ```bash
 # Developer setup
 pip install -e ".[dev]"
-python -m pytest tests/ -v    # 108 tests
+python -m pytest tests/ -v    # 170+ tests
 ```
 
 ## License

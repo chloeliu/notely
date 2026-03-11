@@ -6,57 +6,56 @@ from notely.db import Database
 
 
 def test_flag_today(db: Database):
-    """Test flagging and unflagging action items."""
-    item_id = db.add_standalone_action_item(
+    """Test flagging and unflagging todo items."""
+    item_id = db.add_todo(
         owner="Chloe", task="Test task", space="test"
     )
 
     # Initially no flag
-    item = db.get_action_item(item_id)
+    item = db.get_todo(item_id)
     assert item["flagged_date"] is None
 
     # Flag
-    db.flag_today(item_id, "2026-03-05")
-    item = db.get_action_item(item_id)
+    db.flag_todo_today(item_id, "2026-03-05")
+    item = db.get_todo(item_id)
     assert item["flagged_date"] == "2026-03-05"
 
     # Unflag
-    db.unflag_today(item_id)
-    item = db.get_action_item(item_id)
+    db.unflag_todo_today(item_id)
+    item = db.get_todo(item_id)
     assert item["flagged_date"] is None
 
 
-def test_get_open_action_items_includes_flagged_date(db: Database):
-    """Verify get_open_action_items returns flagged_date and file_path."""
-    item_id = db.add_standalone_action_item(
+def test_get_open_todos_includes_flagged_date(db: Database):
+    """Verify get_open_todos returns flagged_date."""
+    item_id = db.add_todo(
         owner="Chloe", task="Test task", space="test"
     )
-    db.flag_today(item_id, "2026-03-05")
+    db.flag_todo_today(item_id, "2026-03-05")
 
-    items = db.get_open_action_items()
+    items = db.get_open_todos()
     assert len(items) >= 1
 
     found = [i for i in items if i["id"] == item_id]
     assert len(found) == 1
     assert found[0]["flagged_date"] == "2026-03-05"
-    assert "file_path" in found[0]
 
 
-def test_get_folder_for_item_standalone(db: Database):
+def test_get_folder_for_todo_standalone(db: Database):
     """Test folder resolution for standalone items."""
-    item_id = db.add_standalone_action_item(
-        owner="Chloe", task="Test", space="clients", group_name="sanity"
+    item_id = db.add_todo(
+        owner="Chloe", task="Test", space="clients", group_slug="sanity"
     )
-    result = db.get_folder_for_item(item_id)
+    result = db.get_folder_for_todo(item_id)
     assert result is not None
     space, group, display = result
     assert space == "clients"
     assert group == "sanity"
 
 
-def test_get_folder_for_item_nonexistent(db: Database):
+def test_get_folder_for_todo_nonexistent(db: Database):
     """Test folder resolution for non-existent item."""
-    assert db.get_folder_for_item(99999) is None
+    assert db.get_folder_for_todo(99999) is None
 
 
 def test_timer_todo_id(config, tmp_workspace):

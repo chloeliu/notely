@@ -36,6 +36,8 @@ class RoutingDecision:
     subgroup_is_new: bool = False
     append_to_note: str | None = None
     description: str = ""
+    records_only: bool = False
+    existing_note_id: str | None = None
 
 
 def extract_context(raw_text: str, user_context: str | None = None) -> str:
@@ -145,6 +147,12 @@ def route_input(
             result = _handle_dup_choice("u", dup, config, db)
             if result is not None:
                 return result
+        elif dup_choice == "records":
+            result = _handle_dup_choice("u", dup, config, db)
+            if result is not None:
+                result.records_only = True
+                result.existing_note_id = dup["id"]
+                return result
         elif dup_choice == "skip":
             return None
 
@@ -156,6 +164,12 @@ def route_input(
             if dup_choice == "update":
                 result = _handle_dup_choice("u", snippet_match, config, db)
                 if result is not None:
+                    return result
+            elif dup_choice == "records":
+                result = _handle_dup_choice("u", snippet_match, config, db)
+                if result is not None:
+                    result.records_only = True
+                    result.existing_note_id = snippet_match["id"]
                     return result
             elif dup_choice == "skip":
                 return None
@@ -204,7 +218,7 @@ def route_input(
                     pass
                 if dir_matches or note_matches:
                     return present_matches(config, db, dir_matches, note_matches, vec_store, raw_text)
-        return ask_routing_manually(config, hints=hints)
+        return ask_routing_manually(config, hints=hints, context=context)
 
     return present_matches(config, db, dir_matches, note_matches, vec_store, raw_text)
 
@@ -1017,11 +1031,13 @@ def _prompt_folder_with_autocomplete(
 def ask_routing_manually(
     config: NotelyConfig,
     hints: dict[str, str] | None = None,
+    context: str = "",
 ) -> RoutingDecision | None:
     """Fall back to asking the user for routing with folder autocomplete.
 
     If hints provide enough info, builds routing directly.
-    Otherwise, shows an interactive prompt with tab completion.
+    Otherwise, shows top 3 most relevant folders as numbered options,
+    ranked by relevance to the context string.
     Returns None if user cancels.
     """
     from slugify import slugify
@@ -1034,8 +1050,106 @@ def ask_routing_manually(
     if space and group_raw:
         return _routing_from_hints(config, Database(config.db_path), hints)
 
-    # Interactive prompt with autocomplete
-    return _prompt_folder_with_autocomplete(config)
+    # Load existing folders for numbered options
+    try:
+        with Database(config.db_path) as db:
+            db.initialize()
+            all_dirs = db.get_all_directories()
+    except Exception:
+        all_dirs = []
+
+    # Build folder list
+    all_folder_items: list[tuple[str, str]] = []  # (full_path, display_label)
+    all_folder_data: list[tuple[str, str, str | None]] = []  # (space, group_slug, sub)
+    seen: set[str] = set()
+    for d in all_dirs:
+        slug = d.get("group_slug", "")
+        if not slug:
+            continue
+        s = d["space"]
+        sub = d.get("subgroup_slug")
+        fp = f"{s}/{slug}/{sub}" if sub else f"{s}/{slug}"
+        if fp in seen:
+            continue
+        seen.add(fp)
+        display = d.get("display_name", slug)
+        sc = config.get_space(s)
+        space_label = sc.display_name if sc else s
+        label = f"{display} ({space_label})" if display.lower() != s.lower() else display
+        all_folder_items.append((fp, label))
+        all_folder_data.append((s, slug, sub))
+
+    if not all_folder_items:
+        return _prompt_folder_with_autocomplete(config)
+
+    # Rank by relevance to context — substring match on display name / slug
+    context_lower = context.lower() if context else ""
+    context_words = context_lower.split() if context_lower else []
+
+    def _relevance(idx: int) -> float:
+        """Higher = more relevant. Substring match scores highest."""
+        fp, label = all_folder_items[idx]
+        _space, slug, _sub = all_folder_data[idx]
+        name_lower = slug.lower()
+        display_lower = label.lower().split(" (")[0]  # strip space suffix
+        score = 0.0
+        for word in context_words:
+            if word == name_lower or word == display_lower:
+                score += 10.0  # exact word match
+            elif word in name_lower or word in display_lower:
+                score += 5.0  # substring match
+            elif name_lower in word or display_lower in word:
+                score += 3.0  # folder name is part of a context word
+        return score
+
+    ranked = sorted(range(len(all_folder_items)), key=_relevance, reverse=True)
+
+    # Show top 3
+    MAX_OPTIONS = 3
+    top_indices = ranked[:MAX_OPTIONS]
+    folder_items = [all_folder_items[i] for i in top_indices]
+    folder_data = [all_folder_data[i] for i in top_indices]
+
+    console.print("\n[bold]Which folder?[/bold]")
+    choice = pick_from_list(
+        folder_items,
+        extras=[("e", "Somewhere else"), ("s", "Skip")],
+        allow_text=True,
+        console=console,
+    )
+
+    if choice is None or choice == "s":
+        return None
+
+    if choice == "e":
+        return _prompt_folder_with_autocomplete(config)
+
+    # Check if it's a numbered pick
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(folder_data):
+            s, slug, sub = folder_data[idx]
+            display = folder_items[idx][1]
+            if sub:
+                group_display = slug
+                for d in all_dirs:
+                    if d["space"] == s and d["group_slug"] == slug and not d.get("subgroup_slug"):
+                        group_display = d["display_name"]
+                        break
+                return RoutingDecision(
+                    space=s, group_slug=slug, group_display=group_display,
+                    group_is_new=False,
+                    subgroup_slug=sub, subgroup_display=display,
+                )
+            return RoutingDecision(
+                space=s, group_slug=slug, group_display=display,
+                group_is_new=False,
+            )
+    except ValueError:
+        pass
+
+    # Free text typed — resolve it
+    return _resolve_folder_text(config, choice, all_dirs=all_dirs)
 
 
 def _routing_from_hints(

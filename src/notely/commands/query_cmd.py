@@ -121,7 +121,7 @@ def _handle_search(
         entry.update(sm)
 
         # Action items count
-        items = db.get_note_action_items(r["id"])
+        items = db.get_note_todos(r["id"])
         entry["action_items_open"] = sum(1 for i in items if i["status"] == "open")
 
         if query.options.include_body:
@@ -201,7 +201,7 @@ def _handle_get_context(
         recent.append(entry)
 
     # Open action items
-    action_items = db.get_open_action_items(space=space, client=client)
+    action_items = db.get_open_todos(space=space, group_slug=client)
     open_items = [
         {
             "owner": a["owner"],

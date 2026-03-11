@@ -83,7 +83,7 @@ def todo_done_cmd(ctx: click.Context, item_id: int) -> None:
     with Database(config.db_path) as db:
         db.initialize()
 
-        row = db.get_action_item(item_id)
+        row = db.get_todo(item_id)
         if not row:
             console.print(f"[red]No action item with ID {item_id}.[/red]")
             raise SystemExit(1)
@@ -106,7 +106,7 @@ def todo_reopen_cmd(ctx: click.Context, item_id: int) -> None:
     with Database(config.db_path) as db:
         db.initialize()
 
-        row = db.get_action_item(item_id)
+        row = db.get_todo(item_id)
         if not row:
             console.print(f"[red]No action item with ID {item_id}.[/red]")
             raise SystemExit(1)
@@ -127,8 +127,8 @@ def _get_items(
     owner: str | None,
     show_all: bool,
 ) -> list[dict]:
-    """Query action items with filters."""
-    return db.get_action_items_filtered(
+    """Query todos with filters."""
+    return db.get_todos_filtered(
         space=space, client=client, owner=owner, show_all=show_all,
     )
 
@@ -146,17 +146,12 @@ def _output_table(items: list[dict], show_all: bool) -> None:
         else:
             open_count += 1
 
-        # Derive folder path from file_path (e.g. "clients/sanity")
-        fp = item.get("file_path", "")
-        if fp:
-            parts = fp.split("/")
-            folder_path = "/".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
-        else:
-            space = item.get("space") or ""
-            group_name = item.get("group_name") or ""
-            folder_path = f"{space}/{group_name}" if space and group_name else space
+        # Derive folder path from space/group_slug
+        space = item.get("space") or ""
+        group_slug = item.get("group_slug") or ""
+        folder_path = f"{space}/{group_slug}" if space and group_slug else space
 
-        title = item["note_title"]
+        title = item.get("note_title", "")
         from_str = folder_path if folder_path else title
 
         # Line 1: ID + task
@@ -187,19 +182,17 @@ def _output_json(items: list[dict]) -> None:
     """Output action items as JSON."""
     results = []
     for item in items:
-        meta = safe_json_loads(item["space_metadata"])
         results.append({
             "id": item["id"],
             "task": item["task"],
             "owner": item["owner"],
             "due": item["due"],
             "status": item["status"],
-            "space": item["space"],
-            "note_id": item["note_id"],
-            "note_title": item["note_title"],
-            "note_date": item["note_date"],
-            "group": meta.get("client") or meta.get("category"),
-            "group_display": meta.get("client_display") or meta.get("category_display"),
+            "space": item.get("space", ""),
+            "note_id": item.get("note_id"),
+            "note_title": item.get("note_title", ""),
+            "note_date": item.get("note_date", ""),
+            "group_slug": item.get("group_slug", ""),
         })
 
     click.echo(json.dumps({

@@ -19,4 +19,4 @@ See README.md in this directory for data flow diagrams and module guide.
 See docs/ARCHITECTURE.md for architecture details and extension patterns.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

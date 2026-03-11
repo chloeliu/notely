@@ -13,7 +13,7 @@ from rich.prompt import Prompt
 
 from ..config import NotelyConfig
 from ..db import Database
-from ..models import ActionItem, InputSize, Note, Refinement
+from ..models import InputSize, Note, Refinement
 from ..prompts import confirm_action, no_changes_retry
 from ..storage import (
     generate_file_path, write_note, sync_todo_index, sync_ideas_index,
@@ -22,6 +22,7 @@ from ..storage import (
     show_merge_preview,
     edit_merge_result,
     apply_merge,
+    preview_and_save_records,
 )
 
 console = Console()
@@ -200,7 +201,6 @@ def _create_raw_note(
         file_path=rel_path,
         body=raw_text.strip(),
         raw_text=raw_text,
-        action_items=[],
         related_contexts=[],
         space_metadata=space_metadata,
     )
@@ -257,7 +257,7 @@ def _create_ai_note(
     """Create a note or list item with AI structuring + vector routing."""
     from ..ai import (
         structure_only, merge_with_existing, mask_secrets, unmask_secrets,
-        ListItemResult, SnippetResult,
+        ListItemResult, SnippetResult, RecordsOnlyResult,
     )
     from ..models import AIStructuredOutput, NoteRouting
     from ..routing import route_input, ensure_directory_indexed
@@ -317,6 +317,7 @@ def _create_ai_note(
                 existing = read_note(config, existing_db["file_path"])
                 if existing:
                     merge_input = masked_text
+                    existing_actions = db.get_note_todos(existing.id)
 
                     while True:
                         console.print(f"[dim]Merging with '{existing.title}'...[/dim]")
@@ -326,6 +327,7 @@ def _create_ai_note(
                                 space_config_dict, input_size,
                                 user_name=config.user_name,
                                 workspace_path=config.base_dir,
+                                action_items=existing_actions,
                             )
                         except Exception as e:
                             console.print(f"[red]AI merge failed: {e}[/red]")
@@ -337,9 +339,14 @@ def _create_ai_note(
                             merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
                             for item in merge_result.get("new_action_items", []):
                                 item.task = unmask_secrets(item.task, secret_mapping)
+                            for rec in merge_result.get("new_extracted_records", []):
+                                if rec.get("value"):
+                                    rec["value"] = unmask_secrets(rec["value"], secret_mapping)
+                                if rec.get("entity"):
+                                    rec["entity"] = unmask_secrets(rec["entity"], secret_mapping)
 
                         if not auto_confirm:
-                            has_changes = show_merge_preview(existing, merge_result)
+                            has_changes = show_merge_preview(existing, merge_result, display=False)
                             if not has_changes:
                                 retry = no_changes_retry(console=console)
                                 if retry == "d":
@@ -370,12 +377,18 @@ def _create_ai_note(
                                         space_config_dict, input_size,
                                         user_name=config.user_name,
                                         workspace_path=config.base_dir,
+                                        action_items=existing_actions,
                                     )
                                     if secret_mapping:
                                         merge_result["updated_body"] = unmask_secrets(merge_result["updated_body"], secret_mapping)
                                         merge_result["updated_summary"] = unmask_secrets(merge_result["updated_summary"], secret_mapping)
                                         for item in merge_result.get("new_action_items", []):
                                             item.task = unmask_secrets(item.task, secret_mapping)
+                                        for rec in merge_result.get("new_extracted_records", []):
+                                            if rec.get("value"):
+                                                rec["value"] = unmask_secrets(rec["value"], secret_mapping)
+                                            if rec.get("entity"):
+                                                rec["entity"] = unmask_secrets(rec["entity"], secret_mapping)
                                 except Exception as e:
                                     console.print(f"[red]AI revision failed: {e}[/red]")
 
@@ -386,13 +399,24 @@ def _create_ai_note(
                         ):
                             return
 
-                    apply_merge(config, db, existing, merge_result, raw_text)
+                    new_actions, new_records = apply_merge(config, db, existing, merge_result, raw_text)
                     try_vector_sync_note(config, existing)
-                    if existing.action_items:
-                        sync_todo_index(config, db)
+                    sync_todo_index(config, db)
                     sync_ideas_index(config, db)
                     console.print(f"\n[green]Merged into:[/green] {existing.file_path}")
                     console.print(f"[dim]ID: {existing.id}[/dim]")
+
+                    # Step 2: confirm and save extracted records separately
+                    if new_actions or new_records:
+                        preview_and_save_records(
+                            config, db, existing,
+                            action_items=new_actions or None,
+                            extracted_records=new_records or None,
+                            console=console,
+                            auto_confirm=auto_confirm,
+                        )
+                    else:
+                        console.print("[dim]No new action items or records extracted.[/dim]")
                     return
 
         # New note — structure with AI
@@ -420,6 +444,39 @@ def _create_ai_note(
             else:
                 _handle_snippet_result(config, db, snippet_data)
             return
+        except RecordsOnlyResult as e:
+            from ..models import ActionItem
+            raw_records = e.data.get("extracted_records", [])
+            if secret_mapping:
+                for rec in raw_records:
+                    if rec.get("value"):
+                        rec["value"] = unmask_secrets(rec["value"], secret_mapping)
+                    if rec.get("entity"):
+                        rec["entity"] = unmask_secrets(rec["entity"], secret_mapping)
+            items = []
+            records = []
+            for rec in raw_records:
+                if rec.get("snippet_type") == "todo":
+                    items.append(ActionItem(
+                        owner=rec.get("owner", "me"),
+                        task=rec["entity"],
+                        due=rec.get("due"),
+                    ))
+                else:
+                    records.append(rec)
+            if items or records:
+                from ..models import Note
+                placeholder = Note(id="", space="", file_path="")
+                from ..storage import preview_and_save_records
+                preview_and_save_records(
+                    config, db, placeholder,
+                    action_items=items or None,
+                    extracted_records=records or None,
+                    auto_confirm=auto_confirm,
+                )
+            else:
+                console.print("[dim]No records found to extract.[/dim]")
+            return
         except Exception as e:
             console.print(f"[red]AI structuring failed: {e}[/red]")
             console.print("[yellow]Falling back to --no-ai mode.[/yellow]")
@@ -433,6 +490,11 @@ def _create_ai_note(
             result.metadata.summary = unmask_secrets(result.metadata.summary, secret_mapping)
             for item in result.metadata.action_items:
                 item.task = unmask_secrets(item.task, secret_mapping)
+            for rec in result.extracted_records:
+                if rec.get("value"):
+                    rec["value"] = unmask_secrets(rec["value"], secret_mapping)
+                if rec.get("entity"):
+                    rec["entity"] = unmask_secrets(rec["entity"], secret_mapping)
 
         meta = result.metadata
 
@@ -473,10 +535,13 @@ def _create_ai_note(
             file_path=rel_path,
             body=result.body_markdown,
             raw_text=raw_text,
-            action_items=meta.action_items,
             related_contexts=result.related_contexts,
             space_metadata=space_metadata,
         )
+
+        # Action items stored separately — will go to DB via save_and_sync
+        dump_action_items = list(meta.action_items)
+        dump_extracted_records = list(result.extracted_records)
 
         # Show preview and confirm
         if routing.group_is_new and space_cfg:
@@ -497,6 +562,7 @@ def _create_ai_note(
                     console.print("[dim]No changes.[/dim]")
 
             def _dump_note_revise():
+                nonlocal dump_action_items
                 instruction = Prompt.ask("[dim]What should AI change?[/dim]")
                 if instruction.strip():
                     console.print("[dim]Revising...[/dim]")
@@ -505,12 +571,13 @@ def _create_ai_note(
                         revised = revise_note(
                             note, instruction.strip(), space_config_dict, input_size,
                             user_name=config.user_name,
+                            action_items=dump_action_items,
                         )
                         note.title = revised.metadata.title
                         note.summary = revised.metadata.summary
                         note.tags = revised.metadata.tags
                         note.participants = revised.metadata.participants
-                        note.action_items = revised.metadata.action_items
+                        dump_action_items = list(revised.metadata.action_items)
                         note.body = revised.body_markdown
                         note.refinement = Refinement.HUMAN_REVIEWED
                         note.file_path = generate_file_path(
@@ -539,11 +606,21 @@ def _create_ai_note(
             note.attachments.append(rel)
             console.print(f"[dim]Attached: {rel}[/dim]")
 
-        # Save via shared pipeline
+        # Save note via shared pipeline (records confirmed separately)
         save_and_sync(config, db, note, routing=routing, source_file=attachment_path)
 
         console.print(f"\n[green]Saved:[/green] {note.file_path}")
         console.print(f"[dim]ID: {note.id}[/dim]")
+
+        # Step 2: confirm and save extracted records separately
+        if dump_action_items or dump_extracted_records:
+            preview_and_save_records(
+                config, db, note,
+                action_items=dump_action_items or None,
+                extracted_records=dump_extracted_records or None,
+                console=console,
+                auto_confirm=auto_confirm,
+            )
 
 
 def _handle_list_items(
@@ -628,10 +705,5 @@ def _show_preview(note: Note) -> None:
     if note.participants:
         lines.append(f"[bold]People:[/bold]   {', '.join(note.participants)}")
     lines.append(f"[bold]Summary:[/bold]  {note.summary}")
-    if note.action_items:
-        lines.append(f"[bold]Actions:[/bold]  {len(note.action_items)} action item(s)")
-        for item in note.action_items:
-            due_str = f" (due {item.due})" if item.due else ""
-            lines.append(f"    - [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
 
     console.print(Panel("\n".join(lines), title="Note Preview", border_style="blue"))

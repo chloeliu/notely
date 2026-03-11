@@ -12,7 +12,7 @@ from ...config import NotelyConfig
 from ...db import Database
 from ...models import NoteRouting
 from ...prompts import confirm_action, confirm_destructive
-from ...storage import show_merge_preview, edit_merge_result, apply_merge
+from ...storage import show_merge_preview, edit_merge_result, apply_merge, preview_and_save_records
 
 from ._shared import console
 from ._input import _handle_list_result, _handle_snippet_result
@@ -258,6 +258,9 @@ def _handle_inbox(
                 if row.get("summary"):
                     merge_text = f"Summary: {row['summary']}\n\n{merge_text}"
 
+                # Load existing action items from DB for merge context
+                existing_actions = db.get_note_todos(existing.id)
+
                 space_cfg = config.get_space(routing.space)
                 space_config_dict = {
                     "group_by": space_cfg.group_by if space_cfg else "client",
@@ -271,14 +274,15 @@ def _handle_inbox(
                         InputSize.MEDIUM,
                         user_name=config.user_name,
                         workspace_path=config.base_dir,
+                        action_items=existing_actions,
                     )
                 except Exception as e:
                     console.print(f"[red]Merge failed: {e}[/red]")
                     continue
 
-                has_changes = show_merge_preview(existing, merge_result)
+                has_changes = show_merge_preview(existing, merge_result, display=False)
                 if not has_changes:
-                    console.print("[dim]No new information to merge.[/dim]")
+                    console.print("[dim]No new notes or records to update.[/dim]")
                     db.update_inbox_status(row["id"], "skipped")
                     continue
 
@@ -296,13 +300,23 @@ def _handle_inbox(
                     console.print("[yellow]Skipped.[/yellow]")
                     continue
 
-                apply_merge(config, db, existing, mr, merge_text, merge_text)
+                new_actions, new_records = apply_merge(config, db, existing, mr, merge_text, merge_text)
                 db.update_inbox_status(row["id"], "filed", filed_note_id=existing.id)
 
-                if existing.action_items:
-                    sync_todo_index(config, db)
+                sync_todo_index(config, db)
                 sync_ideas_index(config, db)
                 console.print(f"[green]Merged into:[/green] {existing.file_path}")
+
+                # Confirm and save extracted records separately
+                if new_actions or new_records:
+                    preview_and_save_records(
+                        config, db, existing,
+                        action_items=new_actions or None,
+                        extracted_records=new_records or None,
+                        console=console,
+                    )
+                else:
+                    console.print("[dim]No new action items or records extracted.[/dim]")
                 completer.invalidate_todos()
                 continue
 
@@ -334,7 +348,6 @@ def _handle_inbox(
                 file_path=rel_path,
                 body=row.get("body", ""),
                 raw_text="",
-                action_items=action_items,
                 source_url=row.get("source_url", ""),
             )
 
@@ -359,11 +372,10 @@ def _handle_inbox(
                 space=target_space,
                 group_slug=target_group,
                 group_display=routing.group_display or target_group,
-            ))
+            ), action_items=action_items)
             db.update_inbox_status(row["id"], "filed", filed_note_id=note_id)
 
-            if note.action_items:
-                sync_todo_index(config, db)
+            sync_todo_index(config, db)
             sync_ideas_index(config, db)
 
             console.print(f"[green]Filed:[/green] {note.file_path}")
@@ -450,20 +462,23 @@ def _process_raw_inbox_item(
             "fields": space_cfg.fields if space_cfg else [],
         } if space_cfg else {}
 
+        existing_actions = db.get_note_todos(existing.id)
+
         console.print(f"[dim]Merging with '{existing.title}'...[/dim]")
         try:
             merge_result = merge_with_existing(
                 raw_text, existing, space_config_dict,
                 input_size, user_name=config.user_name,
                 workspace_path=config.base_dir,
+                action_items=existing_actions,
             )
         except Exception as e:
             console.print(f"[red]Merge failed: {e}[/red]")
             return
 
-        has_changes = show_merge_preview(existing, merge_result)
+        has_changes = show_merge_preview(existing, merge_result, display=False)
         if not has_changes:
-            console.print("[dim]No new information to merge.[/dim]")
+            console.print("[dim]No new notes or records to update.[/dim]")
             db.update_inbox_status(row["id"], "skipped")
             return
 
@@ -481,11 +496,22 @@ def _process_raw_inbox_item(
             console.print("[yellow]Skipped.[/yellow]")
             return
 
-        apply_merge(config, db, existing, mr, raw_text, raw_text)
+        new_actions, new_records = apply_merge(config, db, existing, mr, raw_text, raw_text)
         db.update_inbox_status(row["id"], "filed", filed_note_id=existing.id)
         sync_todo_index(config, db)
         sync_ideas_index(config, db)
         console.print(f"[green]Merged into:[/green] {existing.file_path}")
+
+        # Confirm and save extracted records separately
+        if new_actions or new_records:
+            preview_and_save_records(
+                config, db, existing,
+                action_items=new_actions or None,
+                extracted_records=new_records or None,
+                console=console,
+            )
+        else:
+            console.print("[dim]No new action items or records extracted.[/dim]")
         completer.invalidate_todos()
         return
 
@@ -537,9 +563,11 @@ def _process_raw_inbox_item(
         file_path=rel_path,
         body=result.body_markdown,
         raw_text=raw_text,
-        action_items=result.metadata.action_items,
         source_url=row.get("source_url", ""),
     )
+
+    # Action items stored separately — will go to DB via save_and_sync
+    inbox_ai_action_items = list(result.metadata.action_items)
 
     # Preview
     preview_lines = [
@@ -548,8 +576,8 @@ def _process_raw_inbox_item(
     ]
     if note.tags:
         preview_lines.append(f"[bold]Tags:[/bold]     {', '.join(note.tags)}")
-    if note.action_items:
-        preview_lines.append(f"[bold]Actions:[/bold]  {len(note.action_items)} item(s)")
+    if inbox_ai_action_items:
+        preview_lines.append(f"[bold]Actions:[/bold]  {len(inbox_ai_action_items)} item(s)")
     if note.body:
         preview_lines.append("")
         for bl in note.body.strip().splitlines()[:15]:
@@ -578,7 +606,7 @@ def _process_raw_inbox_item(
         space=routing.space,
         group_slug=routing.group_slug,
         group_display=routing.group_display or routing.group_slug,
-    ))
+    ), action_items=inbox_ai_action_items)
     db.update_inbox_status(row["id"], "filed", filed_note_id=note_id)
     sync_todo_index(config, db)
     sync_ideas_index(config, db)
@@ -659,7 +687,6 @@ def _save_raw_inbox_item(
         file_path=rel_path,
         body=row.get("body", ""),
         raw_text=row.get("body", ""),
-        action_items=action_items,
         source_url=row.get("source_url", ""),
     )
 
@@ -682,7 +709,7 @@ def _save_raw_inbox_item(
         space=routing.space,
         group_slug=routing.group_slug,
         group_display=routing.group_display or routing.group_slug,
-    ))
+    ), action_items=action_items)
     db.update_inbox_status(row["id"], "filed", filed_note_id=note_id)
     sync_todo_index(config, db)
     sync_ideas_index(config, db)

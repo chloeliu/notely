@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from .ai import build_taxonomy_context
 from .config import NotelyConfig
 from .db import Database, safe_json_loads, safe_parse_tags
-from .models import ActionItem, InputSize, Note, Refinement, SearchFilters
+from .models import ActionItem, ActionItemStatus, InputSize, Note, Refinement, SearchFilters
 logger = logging.getLogger(__name__)
 
 from .storage import (
@@ -37,7 +37,7 @@ notes organized into spaces, groups, and subgroups.
 ## IMPORTANT: When to use these tools
 
 **ONLY use write tools (save_note, update_note, delete_note, add_todo, add_idea, \
-complete_todo, reopen_todo, store_secret, store_reference) when the user EXPLICITLY asks you to.** \
+complete_todo, reopen_todo, store_secret, store_reference, store_contact) when the user EXPLICITLY asks you to.** \
 Look for phrases like:
 - "save this", "note this down", "record this", "capture this"
 - "add this to my notes", "put this in notely", "file this"
@@ -49,7 +49,7 @@ Do NOT proactively save conversation content. Most conversations are just \
 conversations — not everything needs to be recorded.
 
 **Read tools (search_notes, get_note, get_context, get_taxonomy, get_secrets, \
-get_references, find_similar) are fine to use proactively** when they help you answer the user's \
+get_references, get_contacts, find_similar) are fine to use proactively** when they help you answer the user's \
 question — e.g. looking up past notes for context, checking what's already saved, \
 or finding related information.
 
@@ -132,6 +132,7 @@ def save_note(
     group_is_new: bool = False,
     subgroup_is_new: bool = False,
     attachment_paths: list[str] | None = None,
+    extracted_records: list[dict] | None = None,
 ) -> dict:
     """Save a structured note to the notely workspace.
 
@@ -215,7 +216,6 @@ def save_note(
         file_path=rel_path,
         body=body_markdown,
         raw_text="",
-        action_items=parsed_actions,
         related_contexts=related_contexts,
         space_metadata=space_metadata,
     )
@@ -236,7 +236,8 @@ def save_note(
 
     from .storage import save_and_sync
 
-    save_and_sync(config, db, note, source_file=source_file)
+    save_and_sync(config, db, note, source_file=source_file, action_items=parsed_actions,
+                  extracted_records=extracted_records)
     abs_path = config.notes_dir / note.file_path
 
     return {
@@ -298,7 +299,7 @@ def search_notes(
         sm = safe_json_loads(r.get("space_metadata"))
         entry.update(sm)
 
-        items = db.get_note_action_items(r["id"])
+        items = db.get_note_todos(r["id"])
         entry["action_items_open"] = sum(1 for i in items if i["status"] == "open")
 
         if include_body:
@@ -331,7 +332,7 @@ def get_note(note_id: str) -> dict:
         return {"status": "error", "message": f"Note file not found: {row['file_path']}"}
 
     sm = safe_json_loads(row.get("space_metadata"))
-    action_items = db.get_note_action_items(note_id)
+    action_items = db.get_note_todos(note_id)
     cross_refs = db.get_note_cross_refs(note_id)
 
     return {
@@ -431,7 +432,7 @@ def get_context(space: str, client: str | None = None) -> dict:
         recent.append(entry)
 
     # Open action items
-    action_items = db.get_open_action_items(space=space, client=client)
+    action_items = db.get_open_todos(space=space, group_slug=client)
     open_items = [
         {
             "id": a["id"],
@@ -474,12 +475,12 @@ def add_todo(
     config = _get_config()
     db = _get_db()
 
-    item_id = db.add_standalone_action_item(
+    item_id = db.add_todo(
         owner=owner,
         task=task,
         due=due,
         space=space,
-        group_name=group,
+        group_slug=group,
     )
 
     sync_todo_index(config, db)
@@ -497,7 +498,7 @@ def complete_todo(item_id: int) -> dict:
     config = _get_config()
     db = _get_db()
 
-    row = db.get_action_item(item_id)
+    row = db.get_todo(item_id)
 
     if not row:
         return {"status": "error", "message": f"No todo with ID {item_id}"}
@@ -556,6 +557,7 @@ def update_note(
     extra_metadata: dict | None = None,
     related_contexts: list[str] | None = None,
     attachment_paths: list[str] | None = None,
+    extracted_records: list[dict] | None = None,
 ) -> dict:
     """Update an existing note. Only provided fields are changed.
 
@@ -604,13 +606,15 @@ def update_note(
         note.tags = tags
     if participants is not None:
         note.participants = participants
+    # action_items handled below via DB operations
+    new_action_items = None
     if action_items is not None:
-        note.action_items = [
+        new_action_items = [
             ActionItem(
                 owner=ai.get("owner", "me"),
                 task=ai["task"],
                 due=ai.get("due"),
-                status=ai.get("status", "open"),
+                status=ActionItemStatus(ai.get("status", "open")),
             )
             for ai in action_items
         ]
@@ -654,7 +658,13 @@ def update_note(
     # Save via shared pipeline
     from .storage import save_and_sync
 
-    save_and_sync(config, db, note)
+    # For action_items update: delete existing note-linked items, re-insert
+    if new_action_items is not None:
+        db.conn.execute("DELETE FROM action_items WHERE note_id = ?", (note_id,))
+        db.conn.commit()
+
+    save_and_sync(config, db, note, action_items=new_action_items,
+                  extracted_records=extracted_records)
     abs_path = config.notes_dir / note.file_path
 
     return {
@@ -754,52 +764,72 @@ def get_secrets(service: str | None = None) -> dict:
 
 
 @mcp.tool()
-def store_reference(
+def list_databases() -> dict:
+    """List all user-defined databases with record counts.
+
+    Read-only — safe to use proactively. Returns all databases that have records.
+    """
+    db = _get_db()
+    names = set(db.get_database_names())
+    result = {}
+    for name in sorted(names):
+        records = db.get_database_records(name)
+        result[name] = {"count": len(records)}
+    return {"status": "ok", "databases": result}
+
+
+@mcp.tool()
+def store_record(
+    database: str,
     entity: str,
     key: str,
     value: str,
     description: str = "",
-    snippet_type: str = "fact",
     space: str = "",
     group_slug: str = "",
 ) -> dict:
-    """Store a reference snippet (account number, NPI, phone, address, URL, bookmark, or fact).
+    """Store a record in any user-defined database.
 
-    ONLY call this when the user explicitly asks to save/store reference information.
+    ONLY call this when the user explicitly asks to save/store information.
 
-    References are stored in the SQLite database with full-text search support.
+    Any database name auto-creates a new database if it doesn't exist yet.
 
     Args:
-        entity: Entity or service name (e.g. "labcorp", "dr-vaux", "canvas-medical")
-        key: Key name (e.g. "account_number", "npi", "phone", "fax", "docs_url")
-        value: The reference value
-        description: Optional context about this reference
-        snippet_type: Type: "identifier", "bookmark", or "fact" (default: "fact")
-        space: Optional space to scope this reference to
-        group_slug: Optional folder to scope this reference to
+        database: Database name (e.g. "contacts", "references", "vendors")
+        entity: Entity name (e.g. "labcorp", "Jake Chen", "Acme Corp")
+        key: Field label (e.g. "email", "npi", "account_number")
+        value: The value to store
+        description: Optional context
+        space: Optional space to scope to
+        group_slug: Optional folder to scope to
     """
     db = _get_db()
+    config = _get_config()
     ref_id = db.add_reference(
         space=space, group_slug=group_slug,
         entity=entity, key=key, value=value,
-        description=description, snippet_type=snippet_type,
+        description=description, snippet_type=database,
     )
-    return {"status": "ok", "id": ref_id, "entity": entity, "key": key}
+    from .storage import sync_database_indexes
+    sync_database_indexes(config, db)
+    return {"status": "ok", "id": ref_id, "database": database, "entity": entity, "key": key}
 
 
 @mcp.tool()
-def get_references(
+def get_records(
+    database: str | None = None,
     entity: str | None = None,
     space: str | None = None,
     group_slug: str | None = None,
     query: str | None = None,
 ) -> dict:
-    """Look up stored reference data (account numbers, NPIs, phones, addresses, URLs, bookmarks, facts).
+    """Look up stored records from any database. Returns full values.
 
-    Returns full values (unlike get_secrets which only returns key names).
+    Read-only — safe to use proactively. For contacts, also returns recent interaction notes.
 
     Args:
-        entity: Optional entity name to filter by (e.g. "labcorp")
+        database: Optional database name to filter by (e.g. "contacts", "references")
+        entity: Optional entity name to filter by
         space: Optional space to filter by
         group_slug: Optional folder to filter by
         query: Optional full-text search query
@@ -808,6 +838,10 @@ def get_references(
 
     if query:
         results = db.search_references(query, space=space, group_slug=group_slug)
+        if database:
+            results = [r for r in results if r.get("snippet_type") == database]
+    elif database:
+        results = db.get_database_records(database, space=space, group_slug=group_slug, entity=entity)
     else:
         results = db.get_references(space=space, group_slug=group_slug, entity=entity)
 
@@ -816,10 +850,79 @@ def get_references(
     for r in results:
         by_entity.setdefault(r["entity"], []).append(
             {"key": r["key"], "value": r["value"], "description": r.get("description", ""),
-             "type": r["snippet_type"], "id": r["id"]}
+             "database": r.get("snippet_type", "fact"), "id": r["id"]}
         )
 
-    return {"status": "ok", "count": len(results), "references": by_entity}
+    # Add interactions for contacts
+    if database == "contacts" or (not database and any(
+        item.get("database") == "contacts"
+        for items in by_entity.values() for item in items
+    )):
+        for entity_name in by_entity:
+            if any(i.get("database") == "contacts" for i in by_entity[entity_name]):
+                interactions = db.get_contact_interactions(entity_name, limit=5)
+                for item in by_entity[entity_name]:
+                    if item.get("database") == "contacts":
+                        item["recent_notes"] = [
+                            {"id": n["id"], "title": n["title"], "date": n["date"]}
+                            for n in interactions
+                        ]
+                        break
+
+    return {"status": "ok", "count": len(results), "records": by_entity}
+
+
+# --- Deprecated aliases (backward compat for existing Claude Desktop conversations) ---
+
+@mcp.tool()
+def store_reference(
+    entity: str, key: str, value: str,
+    description: str = "", snippet_type: str = "fact",
+    space: str = "", group_slug: str = "",
+) -> dict:
+    """[Deprecated — use store_record] Store a reference snippet.
+
+    ONLY call this when the user explicitly asks to save/store reference information.
+    """
+    return store_record(
+        database=snippet_type,
+        entity=entity, key=key, value=value,
+        description=description, space=space, group_slug=group_slug,
+    )
+
+
+@mcp.tool()
+def get_references(
+    entity: str | None = None, space: str | None = None,
+    group_slug: str | None = None, query: str | None = None,
+) -> dict:
+    """[Deprecated — use get_records] Look up stored reference data."""
+    return get_records(database="references", entity=entity, space=space,
+                       group_slug=group_slug, query=query)
+
+
+@mcp.tool()
+def store_contact(
+    name: str, field: str, value: str,
+    space: str = "", group_slug: str = "",
+) -> dict:
+    """[Deprecated — use store_record] Store contact information.
+
+    ONLY call this when the user explicitly asks to save contact info.
+    """
+    return store_record(
+        database="contacts", entity=name, key=field, value=value,
+        space=space, group_slug=group_slug,
+    )
+
+
+@mcp.tool()
+def get_contacts(
+    name: str | None = None, space: str | None = None,
+    query: str | None = None,
+) -> dict:
+    """[Deprecated — use get_records] Look up stored contact information."""
+    return get_records(database="contacts", entity=name, space=space, query=query)
 
 
 @mcp.tool()
@@ -832,7 +935,7 @@ def reopen_todo(item_id: int) -> dict:
     config = _get_config()
     db = _get_db()
 
-    row = db.get_action_item(item_id)
+    row = db.get_todo(item_id)
 
     if not row:
         return {"status": "error", "message": f"No todo with ID {item_id}"}

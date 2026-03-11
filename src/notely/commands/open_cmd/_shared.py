@@ -203,6 +203,21 @@ def _ensure_vectors(config: NotelyConfig, db: Database) -> None:
         console.print(f"[dim]Search index not available: {e}[/dim]")
 
 
+def _confirm_new_database(config: NotelyConfig, db_name: str) -> bool:
+    """Check if db_name is a new database; if so, ask user to confirm creation.
+
+    Returns True if the database already exists OR user confirmed creation.
+    Returns False if user declined.
+    """
+    from ...storage import confirm_new_database
+
+    with Database(config.db_path) as db:
+        db.initialize()
+        if db.database_exists(db_name):
+            return True
+        return confirm_new_database(db, db_name) is not None
+
+
 def _resync(config: NotelyConfig) -> None:
     """Re-sync DB from files on disk. Picks up manual edits."""
     from ...storage import sync_todo_index, sync_ideas_index

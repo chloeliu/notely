@@ -15,12 +15,30 @@ confirmation in the codebase:
 
 from __future__ import annotations
 
+import os
+import select
+import sys
 from typing import Any, Callable
 
 from rich.console import Console
 from rich.prompt import Prompt
 
 _console = Console()
+
+
+def _drain_stdin() -> None:
+    """Drain leftover bytes from stdin to prevent auto-accepting prompts.
+
+    After prompt-toolkit exits raw mode or after Rich Prompt.ask returns,
+    leftover bytes (newlines, escape sequences, routing choice echoes) can
+    cause the next Prompt.ask to return immediately with garbage input.
+    """
+    try:
+        fd = sys.stdin.fileno()
+        while select.select([fd], [], [], 0.05)[0]:
+            os.read(fd, 4096)
+    except (OSError, ValueError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +51,7 @@ def confirm_action(
     edit_fn: Callable[[], None] | None = None,
     revise_fn: Callable[[], None] | None = None,
     drop_fn: Callable[[], bool] | None = None,
+    drop_label: str = "drop items",
     console: Console | None = None,
 ) -> bool:
     """Show a preview and ask the user to confirm, edit, revise, or skip.
@@ -45,14 +64,20 @@ def confirm_action(
         edit_fn: If provided, adds ``[e]dit`` option.  Called when user picks ``e``.
             Should mutate shared state that ``preview_fn`` also reads.
         revise_fn: If provided, adds ``[r]evise with AI``.
-        drop_fn: If provided, adds ``[d]rop items``.
+        drop_fn: If provided, adds ``[d]rop`` option.
             Must return ``False`` if all items were dropped (cancels the action).
+        drop_label: Label shown after ``[d]`` — default ``"drop items"``.
         console: Rich Console to use.  Falls back to module-level default.
 
     Returns:
         ``True`` if the user confirmed (``Y``), ``False`` if skipped / cancelled.
     """
     con = console or _console
+
+    # Drain leftover stdin bytes that could auto-accept the prompt.
+    # This happens after large pastes or routing prompts — leftover
+    # newlines/escape sequences cause Prompt.ask to return immediately.
+    _drain_stdin()
 
     while True:
         preview_fn()
@@ -64,7 +89,8 @@ def confirm_action(
         if revise_fn is not None:
             parts.append(r"\[r]evise with AI")
         if drop_fn is not None:
-            parts.append(r"\[d]rop items")
+            # drop_label should start with 'd' — we wrap first char in brackets
+            parts.append(rf"\[{drop_label[0]}]{drop_label[1:]}")
         parts.append(r"\[n]o, skip")
 
         try:
@@ -132,6 +158,7 @@ def pick_from_list(
         * ``None`` if the user cancelled (Ctrl-C / EOF).
     """
     con = console or _console
+    _drain_stdin()
 
     # Numbered items
     for i, (_key, label) in enumerate(items, 1):
@@ -201,16 +228,18 @@ def duplicate_found(
         console: Rich Console to use.
 
     Returns:
-        ``"update"``, ``"new"``, or ``"skip"``.
+        ``"update"``, ``"new"``, ``"records"``, or ``"skip"``.
     """
     con = console or _console
+    _drain_stdin()
 
     label = _MATCH_LABELS.get(match_type, match_type)
     con.print(f"\n[dim]{label}:[/dim] '{title}' ({date})")
 
     try:
         choice = Prompt.ask(
-            r"\[u]pdate / \[n]ew / \[s]kip", default="", show_default=False,
+            r"\[u]pdate / \[n]ew / \[r]ecords only / \[s]kip",
+            default="", show_default=False,
         )
     except (KeyboardInterrupt, EOFError):
         return "skip"
@@ -220,6 +249,8 @@ def duplicate_found(
         return "update"
     if ch == "n":
         return "new"
+    if ch == "r":
+        return "records"
     return "skip"
 
 

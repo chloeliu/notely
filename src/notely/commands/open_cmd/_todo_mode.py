@@ -29,7 +29,7 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
         nonlocal items, today_ids, num_to_id
         with Database(config.db_path) as db:
             db.initialize()
-            raw = db.get_open_action_items()
+            raw = db.get_open_todos()
 
         # Filter by owner unless show_all
         if not show_all:
@@ -215,6 +215,10 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
             _todo_move_direct(config, cmd[5:].strip(), num_to_id, items, completer)
             _display()
 
+        elif cmd_lower.startswith("delete "):
+            _todo_delete(config, cmd[7:].strip(), num_to_id, completer)
+            _display()
+
         elif cmd_lower == "refresh":
             _display()
 
@@ -240,14 +244,14 @@ def _derive_folder_key(item: dict) -> str:
             return "/".join(parts[:2])  # space/group
         return parts[0] if parts else ""
     space = item.get("space") or ""
-    group = item.get("group_name") or ""
+    group = item.get("group_slug") or ""
     if space and group:
         return f"{space}/{group}"
     return space
 
 
 def _derive_folder_display(item: dict) -> str:
-    """Derive a human-readable folder path from an action item.
+    """Derive a human-readable folder path from a todo item.
 
     Returns 'space/group' format for clarity (e.g. 'clients/sanity').
     """
@@ -259,9 +263,9 @@ def _derive_folder_display(item: dict) -> str:
             return "/".join(parts[:2])  # space/group
         return parts[0] if parts else ""
 
-    # Standalone items — use space/group_name
+    # Standalone items — use space/group_slug
     space = item.get("space") or ""
-    group = item.get("group_name") or ""
+    group = item.get("group_slug") or ""
     if space and group:
         return f"{space}/{group}"
     return space if space else ""
@@ -346,7 +350,7 @@ def _do_mark_done(config: NotelyConfig, item_id: int, completer: "_SlashComplete
 
     with Database(config.db_path) as db:
         db.initialize()
-        row = db.get_action_item(item_id)
+        row = db.get_todo(item_id)
         if not row:
             console.print(f"[red]No todo with ID {item_id}.[/red]")
             return
@@ -356,6 +360,62 @@ def _do_mark_done(config: NotelyConfig, item_id: int, completer: "_SlashComplete
         update_action_status(config, db, item_id, "done")
         sync_todo_index(config, db)
         console.print(f"[green]✓ Done:[/green] {row['task']}")
+    completer.invalidate_todos()
+
+
+def _todo_delete(
+    config: NotelyConfig,
+    text: str,
+    num_to_id: dict[int, int],
+    completer: "_SlashCompleter",
+) -> None:
+    """Delete todos by number. Supports 'delete 1 3 5', 'delete 1-5', mixed."""
+    from rich.prompt import Prompt
+    from ...storage import sync_todo_index
+
+    # Parse numbers: support "1 3 5", "1-5", or mixed "1-3 5 7"
+    nums: list[int] = []
+    for tok in text.split():
+        if "-" in tok:
+            try:
+                lo, hi = tok.split("-", 1)
+                nums.extend(range(int(lo), int(hi) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                nums.append(int(tok))
+            except ValueError:
+                pass
+    if not nums:
+        console.print("[yellow]Usage: delete N [N2 N3 ...] or delete N-M[/yellow]")
+        return
+
+    valid = [(n, num_to_id[n]) for n in nums if n in num_to_id]
+    invalid = [n for n in nums if n not in num_to_id]
+    if invalid:
+        console.print(f"[yellow]No items for: {', '.join(str(n) for n in invalid)}[/yellow]")
+    if not valid:
+        return
+
+    label = ", ".join(f"#{n}" for n, _ in valid)
+    confirm = Prompt.ask(
+        f"Delete {len(valid)} todo(s) ({label})? This cannot be undone",
+        choices=["y", "n"], default="n",
+    )
+    if confirm != "y":
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    deleted = 0
+    with Database(config.db_path) as db:
+        db.initialize()
+        for _, row_id in valid:
+            if db.delete_reference(row_id):
+                deleted += 1
+        if deleted:
+            sync_todo_index(config, db)
+    console.print(f"[green]Deleted {deleted} todo(s).[/green]")
     completer.invalidate_todos()
 
 
@@ -423,12 +483,12 @@ def _todo_add(config: NotelyConfig, inline_args: str = "") -> None:
     with Database(config.db_path) as db:
         db.initialize()
         from ...storage import sync_todo_index
-        item_id = db.add_standalone_action_item(
+        item_id = db.add_todo(
             owner=config.user_name or "",
             task=task,
             due=due,
             space=space,
-            group_name=group_name,
+            group_slug=group_name,
         )
         sync_todo_index(config, db)
 
@@ -480,7 +540,7 @@ def _todo_today(
             part = part.strip()
             item_id = _resolve_num_or_id(part, num_to_id)
             if item_id is not None:
-                db.flag_today(item_id, today_str)
+                db.flag_todo_today(item_id, today_str)
                 task = next((i["task"] for i in items if i["id"] == item_id), part)
                 flagged.append(task)
 
@@ -585,7 +645,7 @@ def _todo_timer_direct(
     # Need items list for task text — reload from DB
     with Database(config.db_path) as db:
         db.initialize()
-        items = db.get_open_action_items()
+        items = db.get_open_todos()
     for i in items:
         i["_folder_display"] = _derive_folder_display(i)
 
@@ -613,7 +673,7 @@ def _start_timer_for_item(
     if item is None:
         with Database(config.db_path) as db:
             db.initialize()
-            row = db.get_action_item(item_id)
+            row = db.get_todo(item_id)
         if not row:
             console.print(f"[red]No todo with ID {item_id}.[/red]")
             return
@@ -663,7 +723,7 @@ def _todo_plan(
             part = part.strip()
             item_id = _resolve_num_or_id(part, num_to_id)
             if item_id is not None:
-                db.flag_today(item_id, today_str)
+                db.flag_todo_today(item_id, today_str)
                 task = next((i["task"] for i in items if i["id"] == item_id), part)
                 flagged.append(task)
 
@@ -712,7 +772,7 @@ def _todo_item_actions(
         console.print(f"  [green]⏱ Timer running: {elapsed_since(running['start'])}[/green]")
 
     # Build action prompt
-    actions = r"\[d]one / \[r]eassign"
+    actions = r"\[d]one / \[r]eassign / \[x] delete"
     if not is_today:
         actions += r" / \[t]oday"
     if running:
@@ -732,10 +792,23 @@ def _todo_item_actions(
         _do_mark_done(config, item_id, completer)
     elif choice == "r":
         _do_assign(config, item_id, task, completer)
+    elif choice == "x":
+        confirm = Prompt.ask(
+            f"  [red]Delete this todo? This cannot be undone[/red]",
+            choices=["y", "n"], default="n",
+        )
+        if confirm == "y":
+            from ...storage import sync_todo_index
+            with Database(config.db_path) as db:
+                db.initialize()
+                db.delete_reference(item_id)
+                sync_todo_index(config, db)
+            console.print(f"[green]Deleted.[/green]")
+            completer.invalidate_todos()
     elif choice == "t" and not is_today:
         with Database(config.db_path) as db:
             db.initialize()
-            db.flag_today(item_id, today_str)
+            db.flag_todo_today(item_id, today_str)
         today_ids.add(item_id)
         console.print(f"[green]✓ Flagged for today[/green]")
     elif choice == "i" and not running:
@@ -818,7 +891,7 @@ def _todo_move_direct(
 
     with Database(config.db_path) as db:
         db.initialize()
-        db.update_action_item_folder(item_id, space, group_slug or None)
+        db.update_todo_folder(item_id, space, group_slug or None)
         sync_todo_index(config, db)
 
     folder_path = f"{space}/{group_slug}" if group_slug else space

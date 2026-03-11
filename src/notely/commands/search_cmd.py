@@ -79,7 +79,7 @@ def search_cmd(
                 entry.update(sm)
 
                 # Include open action item count
-                items = db.get_note_action_items(r["id"])
+                items = db.get_note_todos(r["id"])
                 entry["action_items_open"] = sum(1 for i in items if i["status"] == "open")
 
                 results.append(entry)

@@ -38,7 +38,7 @@ def show_cmd(ctx: click.Context, note_id: str, json_out: bool, raw: bool) -> Non
         # Read full note from disk
         note = read_note(config, row["file_path"])
 
-        action_items = db.get_note_action_items(note_id)
+        action_items = db.get_note_todos(note_id)
         cross_refs = db.get_note_cross_refs(note_id)
 
     if json_out:

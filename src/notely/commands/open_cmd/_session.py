@@ -15,6 +15,7 @@ from ._shared import (
     _working_folder_query,
     _ensure_vectors,
     _resync,
+    _confirm_new_database,
 )
 
 HELP_TEXT = """
@@ -50,8 +51,13 @@ HELP_TEXT = """
   [cyan]/todo done ID[/cyan]    Quick mark done from main prompt
   [cyan]/ideas[/cyan] [dim]\\[FOLDER][/dim]              Ideas pipeline
   [cyan]/timer[/cyan]           Time tracking ([cyan]/timer start[/cyan], [cyan]stop[/cyan], [cyan]add[/cyan], [cyan]log[/cyan])
-  [cyan]/ref[/cyan]             References ([cyan]/ref entity key value[/cyan] to add)
   [cyan]/secret[/cyan]          Secrets ([cyan]/secret service key[/cyan] to view)
+
+[bold]Databases:[/bold]
+  [cyan]/<name>[/cyan]                         Enter database mode (contacts, references, or custom)
+  [cyan]/<name> add ENTITY key value[/cyan]    Quick add a record
+  [cyan]/<name> delete ID[/cyan]               Delete a record
+  [cyan]/<name> show ENTITY[/cyan]             Show entity details
 
 [bold]Workspace:[/bold]
   [cyan]/spaces[/cyan]          Show spaces overview
@@ -79,6 +85,9 @@ def open_cmd(ctx: click.Context) -> None:
 
     # Migrate references.toml to DB (one-time, idempotent)
     db.migrate_references_toml(config)
+
+    # Migrate action_items to snippets table (one-time, idempotent)
+    db.migrate_action_items_to_snippets()
 
     pruned = db.prune_missing(config)
     if pruned:
@@ -228,10 +237,23 @@ def open_cmd(ctx: click.Context) -> None:
                     console.print("[yellow]Usage: /rmdir space/group[/subgroup][/yellow]")
             elif cmd == "/delete":
                 if arg:
-                    _delete_note(config, arg)
-                    completer.invalidate_notes()
+                    # Support both "/delete NOTE_ID" and "/delete FOLDER NOTE_ID"
+                    parts = arg.split(None, 1)
+                    if len(parts) == 1:
+                        # Single word — could be a note ID or a folder
+                        # Check if it resolves to a folder
+                        match = _fuzzy_match_folder(config, parts[0])
+                        if match:
+                            console.print(f"[yellow]That's a folder. Use tab to pick a note: /delete {parts[0]} [tab][/yellow]")
+                        else:
+                            _delete_note(config, parts[0].strip())
+                            completer.invalidate_notes()
+                    else:
+                        note_id = parts[-1].strip()
+                        _delete_note(config, note_id)
+                        completer.invalidate_notes()
                 else:
-                    console.print("[yellow]Usage: /delete NOTE_ID[/yellow]")
+                    console.print("[yellow]Usage: /delete FOLDER NOTE_ID[/yellow]")
             elif cmd == "/chat":
                 _chat_mode(config, arg or _working_folder_query(working_folder))
             elif cmd == "/sync":
@@ -245,17 +267,25 @@ def open_cmd(ctx: click.Context) -> None:
                 _handle_workflow(config, arg)
             elif cmd == "/inbox":
                 _handle_inbox(config, arg, working_folder, completer)
-            elif cmd == "/ref":
-                _show_references(config, arg)
             elif cmd == "/secret":
                 _show_secrets(config, arg)
             elif cmd == "/agent":
                 _agent_dispatch(config, arg, working_folder)
             elif cmd == "/edit":
                 if arg:
-                    _edit_note_inline(config, arg)
+                    # Support both "/edit NOTE_ID" and "/edit FOLDER NOTE_ID"
+                    parts = arg.split(None, 1)
+                    if len(parts) == 1:
+                        match = _fuzzy_match_folder(config, parts[0])
+                        if match:
+                            console.print(f"[yellow]That's a folder. Use tab to pick a note: /edit {parts[0]} [tab][/yellow]")
+                        else:
+                            _edit_note_inline(config, parts[0].strip())
+                    else:
+                        note_id = parts[-1].strip()
+                        _edit_note_inline(config, note_id)
                 else:
-                    console.print("[yellow]Usage: /edit NOTE_ID[/yellow]")
+                    console.print("[yellow]Usage: /edit FOLDER NOTE_ID[/yellow]")
             elif cmd == "/connect":
                 console.print("[dim]Tip: use /agent connect[/dim]")
                 _agent_connect(config, arg)
@@ -263,7 +293,17 @@ def open_cmd(ctx: click.Context) -> None:
                 console.print("[dim]Tip: use /agent disconnect[/dim]")
                 _agent_disconnect(config, arg)
             else:
-                console.print(f"[yellow]Unknown command: {cmd}. Type /help[/yellow]")
+                # Check if it's a user-defined database name
+                db_name = cmd.lstrip("/")
+                if _is_known_database(config, db_name):
+                    _handle_database_command(config, db_name, arg, working_folder or None)
+                elif arg.strip():
+                    # User typed /<name> <something> — likely a new database add
+                    if _confirm_new_database(config, db_name):
+                        _known_db_cache_invalidate()
+                        _handle_database_command(config, db_name, arg, working_folder or None)
+                else:
+                    console.print(f"[yellow]Unknown command: {cmd}. Type /help[/yellow]")
 
             console.print()
             continue
@@ -281,10 +321,35 @@ from ._input import _read_block, _process_input, _clip_url
 from ._handlers import (
     _handle_todo, _show_ideas,
     _show_list, _show_search, _show_spaces, _timer_dispatch,
-    _show_references, _show_secrets, _handle_workflow,
+    _handle_database_command, _show_secrets, _handle_workflow,
     _mkdir, _rmdir, _delete_note, _edit_note_inline,
 )
 from ._inbox import _handle_inbox
 from ._agent import _agent_dispatch, _agent_connect, _agent_disconnect, _chat_mode
+
+
+_known_db_cache: set[str] | None = None
+
+
+def _is_known_database(config: NotelyConfig, name: str) -> bool:
+    """Check if name is a known database (has records)."""
+    global _known_db_cache
+    if _known_db_cache is not None and name in _known_db_cache:
+        return True
+    # Check DB for databases with records
+    try:
+        with Database(config.db_path) as db:
+            db.initialize()
+            names = set(db.get_database_names())
+        _known_db_cache = names
+        return name in _known_db_cache
+    except Exception:
+        return False
+
+
+def _known_db_cache_invalidate() -> None:
+    """Clear the database name cache after creating a new database."""
+    global _known_db_cache
+    _known_db_cache = None
 
 

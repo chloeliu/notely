@@ -27,7 +27,7 @@ import frontmatter
 from slugify import slugify
 
 from .config import NotelyConfig
-from .models import ActionItem, InputSize, Note, Refinement
+from .models import InputSize, Note, Refinement
 
 logger = logging.getLogger(__name__)
 
@@ -139,12 +139,6 @@ def read_note(config: NotelyConfig, relative_path: str) -> Note | None:
             if legacy_raw.exists():
                 raw_text = legacy_raw.read_text(encoding="utf-8")
 
-    # Parse action items
-    action_items = []
-    for item_data in meta.get("action_items", []):
-        if isinstance(item_data, dict):
-            action_items.append(ActionItem(**item_data))
-
     # Build space_metadata from known space-specific fields
     space_metadata = meta.get("space_metadata", {})
     # Also pick up top-level space-specific fields for backwards compat
@@ -170,7 +164,6 @@ def read_note(config: NotelyConfig, relative_path: str) -> Note | None:
         file_path=relative_path,
         body=body,
         raw_text=raw_text,
-        action_items=action_items,
         source_url=meta.get("source_url", ""),
         related_contexts=meta.get("related_contexts", []),
         attachments=meta.get("attachments", []),
@@ -184,7 +177,6 @@ def append_to_note(
     new_body: str,
     new_raw: str,
     new_tags: list[str] | None = None,
-    new_action_items: list[ActionItem] | None = None,
     new_participants: list[str] | None = None,
     new_summary: str | None = None,
 ) -> Note:
@@ -212,10 +204,6 @@ def append_to_note(
             if p not in seen:
                 existing.participants.append(p)
                 seen.add(p)
-
-    # Append action items
-    if new_action_items:
-        existing.action_items.extend(new_action_items)
 
     # Update summary if provided
     if new_summary:
@@ -296,58 +284,21 @@ def update_action_status(
     item_id: int,
     new_status: str,
 ) -> dict[str, Any] | None:
-    """Update an action item's status via the one-way flow.
+    """Update a todo's status.
 
-    For note-linked items: modifies the Note → writes markdown (source of
-    truth) → re-indexes into DB via upsert_note(). For standalone items
-    (no note): updates DB directly (only place they live).
-
-    Returns the action item row dict if found, None otherwise.
+    Todos are DB-only (snippets table) — just update the row and sync the CSV index.
+    Returns the todo row dict if found, None otherwise.
     """
-    from .models import ActionItemStatus
-
-    row = db.conn.execute(
-        "SELECT * FROM action_items WHERE id = ?", (item_id,),
-    ).fetchone()
+    row = db.get_todo(item_id)
     if not row:
         return None
 
     if row["status"] == new_status:
-        return dict(row)
+        return row
 
-    if row["note_id"]:
-        # Note-linked: update markdown first, then DB follows
-        note_row = db.get_note(row["note_id"])
-        if not note_row:
-            return None
-
-        note = read_note(config, note_row["file_path"])
-        if not note:
-            return None
-
-        # Match DB item to note item by position (DB items are inserted
-        # in the same order as note.action_items during upsert_note)
-        db_items = db.get_note_action_items(row["note_id"])
-        target_idx = None
-        for i, db_item in enumerate(db_items):
-            if db_item["id"] == item_id:
-                target_idx = i
-                break
-
-        if target_idx is not None and target_idx < len(note.action_items):
-            note.action_items[target_idx].status = ActionItemStatus(new_status)
-            note.updated = datetime.now(timezone.utc).isoformat()
-            write_note(config, note)
-            db.upsert_note(note)
-        else:
-            # Fallback: item exists in DB but can't map to markdown position.
-            # This shouldn't happen, but don't lose the status change.
-            db.update_action_item_status(item_id, new_status)
-    else:
-        # Standalone item: only lives in DB
-        db.update_action_item_status(item_id, new_status)
-
-    return dict(row)
+    db.update_todo_status(item_id, new_status)
+    sync_todo_index(config, db)
+    return row
 
 
 def update_action_owner(
@@ -356,53 +307,18 @@ def update_action_owner(
     item_id: int,
     new_owner: str,
 ) -> dict[str, Any] | None:
-    """Update an action item's owner via the one-way flow.
+    """Update a todo's owner.
 
-    Same pattern as update_action_status: note-linked items go through
-    markdown → DB, standalone items update DB directly.
-    Returns the action item row dict if found, None otherwise.
+    Todos are DB-only (snippets table) — just update the row and sync the CSV index.
+    Returns the todo row dict if found, None otherwise.
     """
-    row = db.conn.execute(
-        "SELECT * FROM action_items WHERE id = ?", (item_id,),
-    ).fetchone()
+    row = db.get_todo(item_id)
     if not row:
         return None
 
-    if row["note_id"]:
-        note_row = db.get_note(row["note_id"])
-        if not note_row:
-            return None
-
-        note = read_note(config, note_row["file_path"])
-        if not note:
-            return None
-
-        db_items = db.get_note_action_items(row["note_id"])
-        target_idx = None
-        for i, db_item in enumerate(db_items):
-            if db_item["id"] == item_id:
-                target_idx = i
-                break
-
-        if target_idx is not None and target_idx < len(note.action_items):
-            note.action_items[target_idx].owner = new_owner
-            note.updated = datetime.now(timezone.utc).isoformat()
-            write_note(config, note)
-            db.upsert_note(note)
-        else:
-            db.conn.execute(
-                "UPDATE action_items SET owner = ? WHERE id = ?",
-                (new_owner, item_id),
-            )
-            db.conn.commit()
-    else:
-        db.conn.execute(
-            "UPDATE action_items SET owner = ? WHERE id = ?",
-            (new_owner, item_id),
-        )
-        db.conn.commit()
-
-    return dict(row)
+    db.update_todo_owner(item_id, new_owner)
+    sync_todo_index(config, db)
+    return row
 
 
 def merge_duplicate_todos(
@@ -430,7 +346,7 @@ def merge_duplicate_todos(
 
     # Create standalone merged todo
     owner = cluster[0].get("owner", "")
-    new_id = db.add_standalone_action_item(
+    new_id = db.add_todo(
         owner=owner,
         task=task_text,
         due=merged_due,
@@ -443,27 +359,27 @@ def merge_duplicate_todos(
 
 
 def sync_todo_index(config: NotelyConfig, db: "Database") -> Path:
-    """Regenerate _todos.md from current action items."""
-    from .db import safe_json_loads
-
-    items = db.get_open_action_items()
+    """Regenerate _todos.csv from current todos (snippets table)."""
+    items = db.get_open_todos()
     headers = ["Status", "Task", "Owner", "Due", "Space", "From"]
     rows = []
 
     for item in items:
-        meta = safe_json_loads(item["space_metadata"])
-        group = meta.get("client_display") or meta.get("client") or meta.get("category_display") or meta.get("category", "")
-        from_str = f"{item['space']}"
-        if group:
-            from_str += f" / {group}"
-        from_str += f" / {item['note_title']}"
+        note_title = item.get("note_title", "")
+        space = item.get("space", "")
+        group_slug = item.get("group_slug", "")
+        from_str = space
+        if group_slug:
+            from_str += f" / {group_slug}"
+        if note_title and note_title != "(standalone)":
+            from_str += f" / {note_title}"
 
         rows.append([
             item["status"],
             item["task"],
             item["owner"],
             item.get("due") or "",
-            item["space"],
+            space,
             from_str,
         ])
 
@@ -525,17 +441,6 @@ def _note_to_frontmatter(note: Note) -> dict[str, Any]:
     # Include space-specific fields at top level for readability
     for key, value in note.space_metadata.items():
         fm[key] = value
-
-    if note.action_items:
-        fm["action_items"] = [
-            {
-                "owner": item.owner,
-                "task": item.task,
-                "due": item.due,
-                "status": item.status.value,
-            }
-            for item in note.action_items
-        ]
 
     if note.source_url:
         fm["source_url"] = note.source_url
@@ -601,6 +506,511 @@ def classify_input_size(text: str) -> InputSize:
     return InputSize.LARGE
 
 
+def preview_and_save_records(
+    config: NotelyConfig,
+    db: "Database",
+    note: Note,
+    action_items: list | None = None,
+    extracted_records: list[dict] | None = None,
+    console: Any | None = None,
+    auto_confirm: bool = False,
+) -> bool:
+    """Show extracted records preview and save after user confirmation.
+
+    Two-step flow: the note is already saved. This shows action items and
+    database records extracted alongside the note. User confirms via
+    ``confirm_action`` (same verb-centric UX as the note preview).
+
+    Args:
+        auto_confirm: If True, save without prompting (for --yes / scripted use).
+
+    Returns True if records were saved, False if skipped/cancelled.
+    """
+    from rich.console import Console as RichConsole
+    from rich.panel import Panel
+    from rich.prompt import Prompt
+
+    from .prompts import confirm_action
+
+    if console is None:
+        console = RichConsole()
+
+    items = list(action_items or [])
+    records = list(extracted_records or [])
+
+    if not items and not records:
+        return False
+
+    # --- Diff against DB: split into new vs already-saved ---
+    # Lower threshold (0.60) than /todo dedup (0.80) because AI rephrases
+    # the same task differently each extraction — e.g. "Invite Chloe to
+    # Slack channel" vs "Send Slack channel invites to Chloe" (0.40 with
+    # strict matching). False positives are cheap here (user sees "already
+    # saved" count, can still edit/revise).
+    from .dedup import task_similarity
+    _RECORD_DEDUP_THRESHOLD = 0.55
+
+    existing_todos = db.get_note_todos(note.id) if note.id else []
+
+    existing_items: list = []
+    new_items: list = []
+    for item in items:
+        is_dup = False
+        for et in existing_todos:
+            # Match on task text alone — AI often assigns the same task to
+            # different owners across extractions (non-deterministic).
+            if task_similarity(item.task, et.get("task", "")) > _RECORD_DEDUP_THRESHOLD:
+                is_dup = True
+                break
+        if is_dup:
+            existing_items.append(item)
+        else:
+            new_items.append(item)
+
+    existing_records: list[dict] = []
+    new_records: list[dict] = []
+    for rec in records:
+        stype = rec.get("snippet_type", "")
+        entity = rec.get("entity", "")
+        key = rec.get("key", "")
+        if stype and entity and key:
+            found = db.find_existing_snippet(entity, key, stype)
+            if found:
+                existing_records.append(rec)
+            else:
+                new_records.append(rec)
+        else:
+            new_records.append(rec)
+
+    # If everything is already saved, tell user and return early
+    if not new_items and not new_records:
+        n = len(existing_items) + len(existing_records)
+        console.print(f"[dim]All {n} record(s) already saved.[/dim]")
+        return False
+
+    # Work with new items only — existing ones are skipped
+    items = new_items
+    records = new_records
+
+    # Keep originals for recovery (e.g. "bring them back" after dropping)
+    original_items = list(items)
+    original_records = list(records)
+    # Track revision history so AI understands the chain of changes
+    revision_history: list[str] = []
+
+    def _show_preview():
+        lines: list[str] = []
+        if items:
+            lines.append(f"[bold]New actions:[/bold]  {len(items)} item(s)")
+            for item in items:
+                due_str = f" (due {item.due})" if item.due else ""
+                lines.append(f"    [green]+[/green] [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
+        if records:
+            lines.append(f"[bold]New records:[/bold]  {len(records)} item(s)")
+            for rec in records:
+                stype = rec.get("snippet_type", "")
+                entity = rec.get("entity", "")
+                key = rec.get("key", "")
+                value = rec.get("value", "")
+                lines.append(f"    [green]+[/green] [cyan]{stype}[/cyan]: {entity}.{key} = {value}")
+        if existing_items or existing_records:
+            n = len(existing_items) + len(existing_records)
+            lines.append(f"[dim]Already saved: {n} record(s)[/dim]")
+        console.print(Panel("\n".join(lines), title="Extracted Records", border_style="cyan"))
+
+    if auto_confirm:
+        _show_preview()
+    else:
+        def _records_edit():
+            _edit_records(items, records, console)
+            if not items and not records:
+                console.print("[yellow]All records dropped.[/yellow]")
+
+        def _records_revise():
+            instruction = Prompt.ask("[dim]What should change?[/dim]")
+            if instruction.strip():
+                console.print("[dim]Revising records...[/dim]")
+                _revise_records(
+                    items, records, instruction.strip(), console,
+                    original_items=original_items,
+                    original_records=original_records,
+                    user_name=config.user_name,
+                    note=note,
+                    revision_history=revision_history,
+                )
+                revision_history.append(instruction.strip())
+                if not items and not records:
+                    console.print("[yellow]All records dropped.[/yellow]")
+
+        confirmed = confirm_action(
+            _show_preview,
+            verb="save",
+            edit_fn=_records_edit,
+            revise_fn=_records_revise,
+            console=console,
+        )
+        if not confirmed or (not items and not records):
+            return False
+
+    # Save action items + records (already deduped above)
+    space = note.space
+    parts = note.file_path.split("/")
+    group_slug = parts[1] if len(parts) > 1 else ""
+
+    if items:
+        db.add_todos_for_note(note.id, items, space, group_slug)
+
+    if records:
+        _save_extracted_records(db, records, space, group_slug, note.id)
+
+    # Sync CSVs
+    if items:
+        sync_todo_index(config, db)
+    sync_database_indexes(config, db)
+
+    saved_count = len(items) + len(records)
+    console.print(f"[green]Saved {saved_count} record(s).[/green]")
+    return True
+
+
+def _edit_records(items: list, records: list, console: Any) -> None:
+    """Open records in $EDITOR. Mutates items and records lists in place.
+
+    Renders all items as a simple text format. User edits fields, deletes
+    blocks to drop items. Parsed back on save.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    from .models import ActionItem
+
+    # Build editable text
+    lines: list[str] = []
+    lines.append("# Edit records below. Delete a block to drop it.")
+    lines.append("# Save and close to apply changes.")
+    lines.append("")
+
+    for i, item in enumerate(items, 1):
+        lines.append(f"## Action {i}")
+        lines.append(f"owner: {item.owner}")
+        lines.append(f"task: {item.task}")
+        lines.append(f"due: {item.due or ''}")
+        lines.append("")
+
+    for i, rec in enumerate(records, len(items) + 1):
+        lines.append(f"## Record {i}")
+        lines.append(f"type: {rec.get('snippet_type', '')}")
+        lines.append(f"entity: {rec.get('entity', '')}")
+        lines.append(f"key: {rec.get('key', '')}")
+        lines.append(f"value: {rec.get('value', '')}")
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # Write to temp file and open in editor
+    editor = os.environ.get("EDITOR", "vi")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="notely-records-", delete=False,
+    ) as f:
+        f.write(content)
+        tmp_path = f.name
+
+    try:
+        subprocess.run([editor, tmp_path], check=True)
+
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            edited = f.read()
+    except Exception as e:
+        console.print(f"[red]Editor failed: {e}[/red]")
+        return
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    if edited.strip() == content.strip():
+        console.print("[dim]No changes.[/dim]")
+        return
+
+    # Parse edited text back into items and records
+    new_items: list = []
+    new_records: list[dict] = []
+
+    blocks = edited.split("##")
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        # Parse key: value lines
+        fields: dict[str, str] = {}
+        block_type = ""
+        for line in block.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("action"):
+                block_type = "action"
+                continue
+            if line.lower().startswith("record"):
+                block_type = "record"
+                continue
+            if ": " in line:
+                k, v = line.split(": ", 1)
+                fields[k.strip().lower()] = v.strip()
+            elif line.endswith(":"):
+                # Handle "due:" with no value
+                fields[line[:-1].strip().lower()] = ""
+
+        if block_type == "action" and fields.get("task"):
+            new_items.append(ActionItem(
+                owner=fields.get("owner", "me"),
+                task=fields["task"],
+                due=fields.get("due") or None,
+            ))
+        elif block_type == "record" and fields.get("entity"):
+            new_records.append({
+                "snippet_type": fields.get("type", "fact"),
+                "entity": fields["entity"],
+                "key": fields.get("key", ""),
+                "value": fields.get("value", ""),
+            })
+
+    items.clear()
+    items.extend(new_items)
+    records.clear()
+    records.extend(new_records)
+
+
+def _revise_records(
+    items: list, records: list, instruction: str, console: Any,
+    original_items: list | None = None,
+    original_records: list[dict] | None = None,
+    user_name: str = "",
+    note: "Note | None" = None,
+    revision_history: list[str] | None = None,
+) -> None:
+    """Use AI to revise extracted records based on user instruction.
+
+    Sends current records + original records + note context + revision
+    history so the AI has full context for filtering, restoring, and
+    understanding who "me" refers to.
+    Mutates items and records lists in place.
+    """
+    import anthropic
+
+    from .models import ActionItem
+
+    # Build a compact representation of current records
+    current: list[dict] = []
+    for item in items:
+        current.append({
+            "type": "action",
+            "owner": item.owner,
+            "task": item.task,
+            "due": item.due or "",
+        })
+    for rec in records:
+        current.append({
+            "type": "record",
+            "snippet_type": rec.get("snippet_type", ""),
+            "entity": rec.get("entity", ""),
+            "key": rec.get("key", ""),
+            "value": rec.get("value", ""),
+        })
+
+    # Build original records for recovery context
+    original: list[dict] = []
+    if original_items:
+        for item in original_items:
+            original.append({
+                "type": "action",
+                "owner": item.owner,
+                "task": item.task,
+                "due": item.due or "",
+            })
+    if original_records:
+        for rec in original_records:
+            original.append({
+                "type": "record",
+                "snippet_type": rec.get("snippet_type", ""),
+                "entity": rec.get("entity", ""),
+                "key": rec.get("key", ""),
+                "value": rec.get("value", ""),
+            })
+
+    tool = {
+        "name": "update_records",
+        "description": "Return the revised list of records.",
+        "input_schema": {
+            "type": "object",
+            "required": ["records"],
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string", "enum": ["action", "record"],
+                                "description": "'action' for todos/tasks, 'record' for database entries",
+                            },
+                            "owner": {"type": "string", "description": "Action only: who owns the task"},
+                            "task": {"type": "string", "description": "Action only: the task text"},
+                            "due": {"type": "string", "description": "Action only: due date YYYY-MM-DD"},
+                            "snippet_type": {"type": "string", "description": "Record only: database name (e.g. 'contacts', 'providers')"},
+                            "entity": {"type": "string", "description": "Record only: entity name (e.g. person or org)"},
+                            "key": {"type": "string", "description": "Record only: field name (e.g. 'npi', 'phone')"},
+                            "value": {"type": "string", "description": "Record only: the data value"},
+                        },
+                        "required": ["type"],
+                    },
+                },
+            },
+        },
+    }
+
+    # Build system prompt with context
+    system_parts = [
+        "You are editing a list of extracted records from a note. "
+        "Two record types: 'action' (todo with owner/task/due) and "
+        "'record' (database entry with snippet_type/entity/key/value).",
+    ]
+    if user_name:
+        system_parts.append(
+            f'The current user is "{user_name}". '
+            '"me" / "my" / "mine" / "assigned to me" refers to this person.'
+        )
+    if note:
+        system_parts.append(
+            f"Note context — Title: {note.title}"
+            + (f", Summary: {note.summary}" if note.summary else "")
+            + (f", Participants: {', '.join(note.participants)}" if note.participants else "")
+        )
+    system_parts.append(
+        "Apply the user's instruction precisely: add, remove, filter, or modify items. "
+        "Return the full updated list via the update_records tool. "
+        "To drop an item, simply omit it from the list. "
+        "If the user asks to restore/bring back items, use the original records."
+    )
+
+    # Build message content
+    msg_parts = []
+    if original and original != current:
+        msg_parts.append(f"Original records (can be restored):\n{json.dumps(original, indent=2)}\n")
+    msg_parts.append(f"Current records:\n{json.dumps(current, indent=2)}\n")
+    if revision_history:
+        msg_parts.append("Previous instructions applied:\n" + "\n".join(
+            f"  {i+1}. {h}" for i, h in enumerate(revision_history)
+        ) + "\n")
+    msg_parts.append(f"New instruction: {instruction}")
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system="\n".join(system_parts),
+            messages=[{
+                "role": "user",
+                "content": "\n".join(msg_parts),
+            }],
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "update_records"},
+        )
+    except Exception as e:
+        console.print(f"[red]AI revision failed: {e}[/red]")
+        return
+
+    # Parse response
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "update_records":
+            revised = block.input.get("records", [])
+            break
+    else:
+        console.print("[red]AI returned no records.[/red]")
+        return
+
+    new_items: list = []
+    new_records: list[dict] = []
+    for rec in revised:
+        if rec.get("type") == "action" and rec.get("task"):
+            new_items.append(ActionItem(
+                owner=rec.get("owner", "me"),
+                task=rec["task"],
+                due=rec.get("due") or None,
+            ))
+        elif rec.get("type") == "record" and rec.get("entity"):
+            new_records.append({
+                "snippet_type": rec.get("snippet_type", "fact"),
+                "entity": rec["entity"],
+                "key": rec.get("key", ""),
+                "value": rec.get("value", ""),
+            })
+
+    items.clear()
+    items.extend(new_items)
+    records.clear()
+    records.extend(new_records)
+
+
+def _save_extracted_records(
+    db: "Database",
+    records: list[dict],
+    space: str,
+    group_slug: str,
+    note_id: str,
+) -> int:
+    """Save extracted records from note structuring (auto-confirm mode).
+
+    User already confirmed at the note preview, so records are saved silently.
+    Handles dedup: skips records for unknown databases, auto-resolves entity
+    names, and updates existing entity+key matches.
+
+    Returns the number of records saved or updated.
+    """
+    saved = 0
+    for item in records:
+        entity = item.get("entity", "")
+        key = item.get("key", "")
+        value = item.get("value", "")
+        stype = item.get("snippet_type", "fact")
+
+        if not entity or not stype:
+            continue
+
+        # Guard against AI hallucinating databases that don't exist
+        if not db.database_exists(stype):
+            logger.debug("Skipping record for unknown database: %s", stype)
+            continue
+
+        # Value dedup — exact entity+key match
+        existing = db.find_existing_snippet(entity, key, stype)
+        if existing:
+            if existing["value"] != value:
+                db.update_snippet(existing["id"], value)
+                saved += 1
+            continue
+
+        # Entity name dedup — auto-resolve to closest match
+        similar = db.find_similar_entities(entity, stype)
+        if similar:
+            entity = similar[0]
+
+        db.add_reference(
+            space=space, group_slug=group_slug,
+            entity=entity, key=key, value=value,
+            snippet_type=stype, note_id=note_id,
+        )
+        saved += 1
+
+    if saved:
+        logger.debug("Saved %d extracted record(s)", saved)
+    return saved
+
+
 def save_and_sync(
     config: NotelyConfig,
     db: "Database",
@@ -608,6 +1018,8 @@ def save_and_sync(
     hash_source: str | None = None,
     routing: Any = None,
     source_file: Path | None = None,
+    action_items: list | None = None,
+    extracted_records: list[dict] | None = None,
 ) -> None:
     """Full save pipeline: write markdown → upsert DB → sync vectors → sync CSVs.
 
@@ -626,6 +1038,11 @@ def save_and_sync(
             is new, indexes the directory in the vector store.
         source_file: optional original binary file (PDF/image) to copy into .raw/
             for provenance.
+        action_items: list of ActionItem objects to insert into the DB linked
+            to this note. Todos are DB-only, not stored in markdown.
+        extracted_records: list of record dicts extracted alongside the note
+            for databases marked 'auto-extract from notes'. Saved silently
+            (user already confirmed at preview).
     """
     from .vectors import try_vector_sync_note
 
@@ -646,11 +1063,26 @@ def save_and_sync(
         from .routing import ensure_directory_indexed
         ensure_directory_indexed(config, db, routing, note_summary=note.summary)
 
-    # Step 5: sync CSV index files
-    if note.action_items:
+    # Step 5: insert todos into DB (linked to this note, snippets table)
+    if action_items:
+        space = note.space
+        # Derive group from file_path: "space/group/..." → "group"
+        parts = note.file_path.split("/")
+        group_slug = parts[1] if len(parts) > 1 else ""
+        db.add_todos_for_note(note.id, action_items, space, group_slug)
+
+    # Step 6: save extracted records (auto-extract from notes)
+    if extracted_records:
+        space = note.space
+        parts = note.file_path.split("/")
+        group_slug = parts[1] if len(parts) > 1 else ""
+        _save_extracted_records(db, extracted_records, space, group_slug, note.id)
+
+    # Step 7: sync CSV index files
+    if action_items:
         sync_todo_index(config, db)
     sync_ideas_index(config, db)
-    sync_references_index(config, db)
+    sync_database_indexes(config, db)
 
 
 def edit_note_in_editor(note: Note) -> Note | None:
@@ -698,21 +1130,6 @@ def edit_note_in_editor(note: Note) -> Note | None:
         note.participants = meta.get("participants", note.participants)
         note.body = edited_post.content
 
-        # Parse action items back
-        raw_items = meta.get("action_items", [])
-        if raw_items:
-            from .models import ActionItem, ActionItemStatus
-            parsed_items = []
-            for item_data in raw_items:
-                if isinstance(item_data, dict):
-                    parsed_items.append(ActionItem(
-                        owner=item_data.get("owner", "me"),
-                        task=item_data.get("task", ""),
-                        due=item_data.get("due"),
-                        status=ActionItemStatus(item_data.get("status", "open")),
-                    ))
-            note.action_items = parsed_items
-
         # Update space metadata fields that live at top level in frontmatter
         for key in ("client", "client_display", "topic", "topic_display",
                      "category", "category_display", "content_status",
@@ -726,16 +1143,21 @@ def edit_note_in_editor(note: Note) -> Note | None:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def show_merge_preview(existing: Note, merge_result: dict) -> bool:
+def show_merge_preview(existing: Note, merge_result: dict, display: bool = True) -> bool:
     """Show a diff-style preview of what a merge will change.
 
     Compares merge_result against the existing note and displays a Rich panel
-    with red/green diff for summary, new action items, tags, and participants.
+    with red/green diff for summary, body, tags, and participants.
+    Action items and extracted records are NOT shown here — they get their
+    own confirmation step via ``preview_and_save_records()``.
 
     Args:
         existing: the current Note being updated
         merge_result: dict with keys: updated_summary, updated_body,
             new_action_items, new_tags, new_participants
+        display: If False, only check for changes without rendering.
+            Use this to avoid double-rendering when ``confirm_action``
+            will call the preview again.
 
     Returns:
         True if there are meaningful changes to apply, False if nothing changed.
@@ -751,6 +1173,9 @@ def show_merge_preview(existing: Note, merge_result: dict) -> bool:
     summary_changed = new_summary != old_summary
 
     new_actions = merge_result.get("new_action_items", [])
+    new_records = merge_result.get("new_extracted_records", [])
+    has_records = bool(new_actions) or bool(new_records)
+
     new_tags = merge_result.get("new_tags", [])
     existing_tags = set(existing.tags)
     actually_new_tags = [t for t in new_tags if t not in existing_tags]
@@ -765,11 +1190,31 @@ def show_merge_preview(existing: Note, merge_result: dict) -> bool:
     body_changed = new_body != old_body
 
     # No meaningful changes — skip the diff panel entirely
-    if not summary_changed and not new_actions and not actually_new_tags and not actually_new_p and not body_changed:
-        console.print(f"[dim]No new information to add to '{existing.title}'.[/dim]")
+    has_note_changes = summary_changed or actually_new_tags or actually_new_p or body_changed
+    if not has_note_changes and not has_records:
+        if display:
+            console.print("[dim]No new notes or records to update.[/dim]")
         return False
 
-    # Build diff display
+    if not display:
+        return True
+
+    # Records only, no note-level changes — show what was extracted
+    if not has_note_changes and has_records:
+        console.print(f"[dim]No note changes for '{existing.title}', but records to extract:[/dim]")
+        if new_actions:
+            for item in new_actions:
+                due_str = f" (due {item.due})" if item.due else ""
+                console.print(f"  [cyan]{item.owner}[/cyan]: {item.task}{due_str}")
+        if new_records:
+            for rec in new_records:
+                entity = rec.get("entity", "")
+                key = rec.get("key", "")
+                value = rec.get("value", "")
+                console.print(f"  [cyan]{rec.get('snippet_type', '')}[/cyan]: {entity}.{key} = {value}")
+        return True
+
+    # Build diff display — note-level changes only
     lines = [
         f"[bold]Updating:[/bold] {existing.title}",
         "",
@@ -793,16 +1238,6 @@ def show_merge_preview(existing: Note, merge_result: dict) -> bool:
             for al in added_lines:
                 lines.append(f"  [green]+ {al[:200]}[/green]")
 
-    if new_actions:
-        lines.append("")
-        lines.append(f"[bold]+ {len(new_actions)} new action item(s):[/bold]")
-        for item in new_actions:
-            due_str = f" (due {item.due})" if item.due else ""
-            lines.append(f"  [green]+ \\[{item.owner}] {item.task}{due_str}[/green]")
-    existing_count = len(existing.action_items)
-    if existing_count:
-        lines.append(f"  [dim]({existing_count} existing action item(s) kept)[/dim]")
-
     if actually_new_tags:
         lines.append("")
         lines.append(f"[bold]+ Tags:[/bold] [green]{', '.join(actually_new_tags)}[/green]")
@@ -818,6 +1253,12 @@ def show_merge_preview(existing: Note, merge_result: dict) -> bool:
         lines.append(f"[bold]+ References:[/bold] {len(refs)} detected")
         for ref in refs:
             lines.append(f"    {ref.entity}.{ref.key} = [cyan]{ref.value}[/cyan]")
+
+    # Hint about records confirmed separately
+    if has_records:
+        count = len(new_actions) + len(new_records)
+        lines.append("")
+        lines.append(f"[dim]+ {count} record(s) will be confirmed separately[/dim]")
 
     console.print(Panel("\n".join(lines), title="Changes", border_style="yellow"))
     return True
@@ -928,14 +1369,15 @@ def apply_merge(
                 existing.participants.append(p)
                 seen.add(p)
 
-    # Append new action items
-    if merge_result.get("new_action_items"):
-        existing.action_items.extend(merge_result["new_action_items"])
-
     existing.updated = datetime.now(timezone.utc).isoformat()
 
-    # Save via the full pipeline
+    # Save note via the full pipeline — records returned for separate confirmation
     save_and_sync(config, db, existing, hash_source=paste_content)
+
+    # Return records for caller to confirm and save separately
+    new_actions = merge_result.get("new_action_items") or []
+    new_records = merge_result.get("new_extracted_records") or []
+    return new_actions, new_records
 
 
 def handle_todo_dedup(
@@ -1223,12 +1665,12 @@ def confirm_and_save_list_items(
     items = state["items"]
     if item_type == "todo":
         for item in items:
-            item_id = db.add_standalone_action_item(
+            item_id = db.add_todo(
                 owner=item.get("owner", "me"),
                 task=item.get("text", item.get("task", "")),
                 due=item.get("due"),
                 space=item.get("space"),
-                group_name=item.get("group"),
+                group_slug=item.get("group"),
             )
             console.print(f"  [green]Added todo #{item_id}:[/green] {item.get('text', item.get('task', ''))}")
         sync_todo_index(config, db)
@@ -1244,6 +1686,85 @@ def confirm_and_save_list_items(
         sync_ideas_index(config, db)
 
     return True
+
+
+def confirm_new_database(db: Any, name: str) -> str | None:
+    """Prompt user to create a new snippet database with description and fields.
+
+    When ``name`` is empty, shows existing databases to pick from or lets user
+    type a new name (the "new" sentinel flow).  When ``name`` is a specific
+    name, confirms creation of that database.
+
+    Returns the database name on success, None if declined/cancelled.
+    The db connection must already be initialized.
+    """
+    from rich.console import Console
+    from rich.prompt import Prompt
+
+    from .prompts import pick_from_list
+
+    console = Console()
+
+    try:
+        # --- "new" sentinel: let user pick existing or name a new one ---
+        if not name:
+            existing = db.get_database_names()
+            if existing:
+                console.print("[bold]Which database?[/bold]")
+                items = [(n, n) for n in existing]
+                choice = pick_from_list(
+                    items,
+                    extras=[("n", "Create new database"), ("s", "Skip")],
+                    console=console,
+                )
+                if choice is None or choice == "s":
+                    return None
+                if choice == "n":
+                    # Fall through to creation below
+                    pass
+                else:
+                    try:
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(existing):
+                            return existing[idx]
+                    except ValueError:
+                        pass
+                    return None
+
+            # No existing databases or user chose "create new"
+            name = Prompt.ask("[dim]Database name (lowercase, e.g. contacts, vendors)[/dim]", default="").strip()
+            if not name:
+                return None
+            name = name.lower().replace(" ", "-")
+            if db.database_exists(name):
+                return name  # already exists, just use it
+
+        # --- Set up the new database ---
+        console.print(f"[dim]Creating '{name}' database...[/dim]")
+        desc = Prompt.ask(
+            "[dim]Description (what's this database for?)[/dim]",
+            default="",
+        )
+        fields_raw = Prompt.ask(
+            "[dim]Expected fields (comma-separated, e.g. email, phone, role)[/dim]",
+            default="",
+        )
+        extract = Prompt.ask(
+            r"[dim]Auto-extract from future notes?[/dim]",
+            choices=["y", "n"],
+            default="n",
+        )
+        if desc.strip():
+            db.set_database_description(name, desc.strip())
+        if fields_raw.strip():
+            fields = [f.strip().lower() for f in fields_raw.split(",") if f.strip()]
+            if fields:
+                db.set_database_fields(name, fields)
+        if extract == "y":
+            db.set_database_meta(name, "extract_from_notes", "true")
+        return name
+    except (KeyboardInterrupt, EOFError):
+        return None
 
 
 def _render_snippet_preview(
@@ -1340,20 +1861,15 @@ def confirm_and_save_snippets(
     group_slug: str = "",
     auto_confirm: bool = False,
 ) -> bool:
-    """Preview snippet items and save to DB after user confirmation.
+    """Preview snippet items, confirm database, dedup entities, and save.
 
-    Supports editing in $EDITOR, AI revision, and dropping specific items
-    before saving — matching the note preview UX.
+    Simple flow:
+    1. Show preview of what AI extracted
+    2. Confirm database: "Save to 'X'? [Y]es / [n]ew database / [s]kip"
+    3. Entity dedup: "Looks similar to 'Y'. [u]pdate / [s]kip / [n]ew"
+    4. Save
 
     Per-item ``space`` and ``group`` fields override the caller-level defaults.
-
-    Args:
-        config: workspace config
-        db: initialized Database instance
-        data: dict with "items" list from SnippetResult
-        space: default space for items that don't specify one
-        group_slug: default group_slug for items that don't specify one
-        auto_confirm: skip the confirmation prompt (for --yes flag)
 
     Returns:
         True if snippets were saved, False if cancelled or empty.
@@ -1361,119 +1877,278 @@ def confirm_and_save_snippets(
     from rich.console import Console
     from rich.prompt import Prompt
 
-    from .prompts import confirm_action
-
     console = Console()
-    state = {"items": data.get("items", [])}
-    if not state["items"]:
+    items = data.get("items", [])
+    if not items:
         console.print("[yellow]AI returned no snippets.[/yellow]")
         return False
 
+    # Show preview
+    _render_snippet_preview(console, items)
+
     if not auto_confirm:
-        def preview():
-            _render_snippet_preview(console, state["items"])
-
-        def edit():
-            edited = _edit_snippets_in_editor(state["items"])
-            if edited is not None:
-                if not edited:
-                    console.print("[yellow]All items removed. Cancelled.[/yellow]")
-                    state["items"] = []
-                    return
-                state["items"] = edited
-            else:
-                console.print("[dim]No changes made.[/dim]")
-
-        def revise():
-            try:
-                instruction = Prompt.ask("[dim]What to change[/dim]", default="")
-            except (KeyboardInterrupt, EOFError):
-                return
-            if instruction.strip():
-                from .ai import revise_list_items
-                console.print("[dim]Revising...[/dim]")
-                revised = revise_list_items(state["items"], "snippet", instruction)
-                if revised:
-                    state["items"] = revised
-                else:
-                    console.print("[yellow]Revision returned no items.[/yellow]")
-
-        def drop():
-            try:
-                nums = Prompt.ask("[dim]Drop (numbers, comma-separated)[/dim]", default="")
-            except (KeyboardInterrupt, EOFError):
-                return True
-            if nums.strip():
-                drop_set = set()
-                for part in nums.split(","):
-                    try:
-                        drop_set.add(int(part.strip()) - 1)
-                    except ValueError:
-                        pass
-                state["items"] = [it for i, it in enumerate(state["items"]) if i not in drop_set]
-                console.print(f"[dim]Dropped {len(drop_set)} item(s).[/dim]")
-                if not state["items"]:
-                    console.print("[yellow]All items dropped. Cancelled.[/yellow]")
-                    return False
-            return True
-
-        confirmed = confirm_action(
-            preview, verb="save all",
-            edit_fn=edit, revise_fn=revise, drop_fn=drop,
-            console=console,
-        )
-        if not confirmed or not state["items"]:
+        # Confirm before saving
+        try:
+            choice = Prompt.ask(
+                r"\[Y]es, save / \[n]o, skip", default="y", show_default=False,
+            )
+        except (KeyboardInterrupt, EOFError):
             return False
-    else:
-        _render_snippet_preview(console, state["items"])
+        if choice.strip().lower()[:1] != "y":
+            return False
 
-    # Save items
-    items = state["items"]
+    if not auto_confirm:
+        # Step 1: Confirm database for each unique snippet_type
+        resolved_dbs: dict[str, str | None] = {}
+        for item in items:
+            stype = item.get("snippet_type", "fact")
+            if stype in resolved_dbs:
+                continue
+            if db.database_exists(stype):
+                # Existing database — use it directly
+                resolved_dbs[stype] = stype
+            else:
+                # New database — confirm with user
+                resolved = _confirm_database_choice(db, stype, console, Prompt)
+                resolved_dbs[stype] = resolved
+
+        # Apply resolved names and drop skipped items
+        kept = []
+        for item in items:
+            stype = item.get("snippet_type", "fact")
+            target = resolved_dbs.get(stype, stype)
+            if target is None:
+                continue
+            item["snippet_type"] = target
+            kept.append(item)
+        items = kept
+        if not items:
+            console.print("[yellow]All items skipped.[/yellow]")
+            return False
+
+        # Flat snippet: collapse structured items into plain text facts
+        if any(it.get("snippet_type") == "fact" for it in items):
+            flat_items = []
+            for item in items:
+                if item.get("snippet_type") == "fact":
+                    # Combine entity.key = value into a single text entry
+                    entity = item.get("entity", "")
+                    key = item.get("key", "")
+                    value = item.get("value", "")
+                    desc = item.get("description", "")
+                    text = f"{key}: {value}" if key else value
+                    flat_items.append({
+                        "entity": entity,
+                        "key": "info",
+                        "value": text,
+                        "description": desc,
+                        "snippet_type": "fact",
+                        "tags": item.get("tags", []),
+                    })
+                else:
+                    flat_items.append(item)
+            items = flat_items
+
+    # Step 2: Entity dedup — check for similar entities
+    resolved_entities: dict[str, str] = {}
     for item in items:
+        entity = item["entity"]
+        stype = item.get("snippet_type", "fact")
+        cache_key = f"{stype}:{entity}"
+        if cache_key in resolved_entities:
+            resolved = resolved_entities[cache_key]
+            if resolved is None:
+                item["entity"] = None  # mark for skip
+            else:
+                item["entity"] = resolved
+            continue
+        # If entity already exists exactly, skip name dedup — value dedup handles it
+        if db.find_existing_snippet(entity, item.get("key", ""), stype):
+            resolved_entities[cache_key] = entity
+            continue
+        similar = db.find_similar_entities(entity, stype)
+        if similar:
+            from .prompts import pick_from_list
+            console.print(f"\n[dim]'{entity}' looks similar to existing entities:[/dim]")
+            pick_items = [(s, s) for s in similar[:3]]
+            choice = pick_from_list(
+                pick_items,
+                extras=[("n", "New"), ("s", "Skip")],
+                prompt_text="Choice",
+                default="1",
+                console=console,
+            )
+            if choice is None or choice == "s":
+                resolved_entities[cache_key] = None
+            elif choice == "n":
+                resolved_entities[cache_key] = entity
+            elif choice.isdigit() and 1 <= int(choice) <= len(pick_items):
+                resolved = similar[int(choice) - 1]
+                item["entity"] = resolved
+                resolved_entities[cache_key] = resolved
+            else:
+                resolved_entities[cache_key] = entity
+
+    # Step 3: Duplicate check + save
+    saved = 0
+    for item in items:
+        entity = item["entity"]
+        if entity is None:
+            continue  # skipped at entity dedup
+        key = item["key"]
+        value = item["value"]
+        stype = item.get("snippet_type", "fact")
+
+        existing = db.find_existing_snippet(entity, key, stype)
+        if existing and not auto_confirm:
+            console.print(
+                f"\n[dim]Already exists:[/dim] {entity} / {key}"
+            )
+            console.print(f"  [dim]Current:[/dim] {existing['value']}")
+            console.print(f"  [dim]New:[/dim]     {value}")
+            try:
+                choice = Prompt.ask(
+                    r"\[u]pdate / \[s]kip", default="s", show_default=False,
+                )
+            except (KeyboardInterrupt, EOFError):
+                choice = "s"
+            ch = choice.strip().lower()[:1]
+            if ch == "u":
+                db.update_snippet(
+                    existing["id"], value,
+                    description=item.get("description", "") or existing.get("description", ""),
+                )
+                saved += 1
+            # else skip
+            continue
+
         db.add_reference(
             space=item.get("space") or space,
             group_slug=item.get("group") or group_slug,
-            entity=item["entity"],
-            key=item["key"],
-            value=item["value"],
+            entity=entity,
+            key=key,
+            value=value,
             description=item.get("description", ""),
-            snippet_type=item.get("snippet_type", "fact"),
+            snippet_type=stype,
             tags=item.get("tags", []),
         )
-    console.print(f"[green]Saved {len(items)} snippet(s).[/green]")
-    sync_references_index(config, db)
-    return True
+        saved += 1
+
+    if saved:
+        console.print(f"[green]Saved {saved} snippet(s).[/green]")
+        sync_database_indexes(config, db)
+        return True
+    else:
+        console.print("[yellow]No snippets saved.[/yellow]")
+        return False
 
 
-def sync_references_index(config: NotelyConfig, db: "Database") -> Path | None:
-    """Regenerate _references.csv from current references in DB."""
+def _confirm_database_choice(db: Any, suggested: str, console: Any, Prompt: Any) -> str | None:
+    """No existing database matches — ask user what to do.
+
+    When existing databases exist, shows them as numbered choices with
+    letter extras. Otherwise shows action-only prompt.
+
+    Returns the snippet_type to use, or None to skip.
+    """
+    from .prompts import pick_from_list
+
+    existing = [n for n in db.get_database_names() if n != "todo"]
+    if existing:
+        # Show existing databases as numbered picks + actions as extras
+        console.print("[dim]Which database?[/dim]")
+        items = [(n, n) for n in existing]
+        choice = pick_from_list(
+            items,
+            extras=[("n", "New database"), ("f", "Flat snippet"), ("s", "Skip")],
+            console=console,
+        )
+        if choice is None or choice == "s":
+            return None
+        if choice == "f":
+            return "fact"
+        if choice == "n":
+            pass  # fall through to creation below
+        else:
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(existing):
+                    return existing[idx]
+            except ValueError:
+                pass
+            return None
+    else:
+        # No existing databases — action-only prompt
+        console.print("[yellow]No existing database.[/yellow]")
+        try:
+            choice = Prompt.ask(
+                r"\[f]lat snippet / \[c]reate database / \[s]kip",
+                default="f", show_default=False,
+            )
+        except (KeyboardInterrupt, EOFError):
+            return None
+        ch = choice.strip().lower()
+        if ch in ("s", ""):
+            return None
+        if ch == "f" or not ch:
+            return "fact"
+
+    # Create new database — full flow
+    try:
+        name = Prompt.ask(
+            "[dim]Database name[/dim]", default="",
+        ).strip().lower().replace(" ", "-")
+        if not name:
+            return None
+        if db.database_exists(name):
+            return name
+        return confirm_new_database(db, name)
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def sync_database_indexes(config: NotelyConfig, db: "Database") -> None:
+    """Regenerate one CSV per user-defined database (snippet_type) from DB."""
     from .db import safe_parse_tags
 
     try:
-        refs = db.get_references()
+        db_names = db.get_database_names()
     except Exception:
-        return None
+        return
 
-    if not refs:
-        return None
+    headers = ["ID", "Space", "Folder", "Entity", "Key", "Value", "Description", "Tags", "Created"]
+    for name in db_names:
+        try:
+            records = db.get_database_records(name)
+        except Exception:
+            continue
+        if not records:
+            continue
+        rows = []
+        for r in records:
+            tags = safe_parse_tags(r.get("tags"))
+            rows.append([
+                r["id"],
+                r.get("space", ""),
+                r.get("group_slug", ""),
+                r["entity"],
+                r["key"],
+                r["value"],
+                r.get("description", ""),
+                ", ".join(tags[:5]),
+                r.get("created", ""),
+            ])
+        write_index_file(config, name, headers, rows)
 
-    headers = ["ID", "Space", "Folder", "Entity", "Key", "Value", "Description", "Type", "Tags", "Created"]
-    rows = []
-    for r in refs:
-        tags = safe_parse_tags(r.get("tags"))
-        rows.append([
-            r["id"],
-            r.get("space", ""),
-            r.get("group_slug", ""),
-            r["entity"],
-            r["key"],
-            r["value"],
-            r.get("description", ""),
-            r.get("snippet_type", "fact"),
-            ", ".join(tags[:5]),
-            r.get("created", ""),
-        ])
 
-    return write_index_file(config, "references", headers, rows)
+# Legacy aliases — callers that sync a single database after mutation
+def sync_references_index(config: NotelyConfig, db: "Database") -> None:
+    """Regenerate _references.csv. Delegates to sync_database_indexes."""
+    sync_database_indexes(config, db)
+
+
+def sync_contacts_index(config: NotelyConfig, db: "Database") -> None:
+    """Regenerate _contacts.csv. Delegates to sync_database_indexes."""
+    sync_database_indexes(config, db)
 
 

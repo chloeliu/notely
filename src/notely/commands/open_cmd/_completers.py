@@ -12,10 +12,11 @@ from ._shared import _get_all_folders
 class _SlashCompleter(Completer):
     """Tab-complete slash commands, /chat folder names, and /agent folder + @note."""
 
-    COMMANDS = [
+    # Static commands — database commands are added dynamically
+    _STATIC_COMMANDS = [
         "/agent", "/chat", "/clip", "/folder", "/inbox", "/timer", "/todo",
         "/ideas", "/list", "/search", "/spaces", "/mkdir", "/rmdir",
-        "/delete", "/edit", "/ref", "/secret", "/sync", "/workflow", "/help", "/quit",
+        "/delete", "/edit", "/secret", "/sync", "/workflow", "/help", "/quit",
     ]
 
     def __init__(self, config: NotelyConfig) -> None:
@@ -25,6 +26,26 @@ class _SlashCompleter(Completer):
         self._todo_cache: list[dict] | None = None
         self._recent_notes_cache: list[dict] | None = None
         self._secret_cache: dict[str, dict[str, str]] | None = None
+        self._db_names_cache: set[str] | None = None
+
+    def _get_database_names(self) -> set[str]:
+        """Get all database names that have records in the DB."""
+        if self._db_names_cache is None:
+            names: set[str] = set()
+            try:
+                with Database(self._config.db_path) as db:
+                    db.initialize()
+                    names = set(db.get_database_names())
+            except Exception:
+                pass
+            self._db_names_cache = names
+        return self._db_names_cache
+
+    @property
+    def COMMANDS(self) -> list[str]:
+        """Dynamic command list including database names."""
+        db_cmds = [f"/{name}" for name in sorted(self._get_database_names())]
+        return self._STATIC_COMMANDS + db_cmds
 
     def _get_folders(self) -> list[tuple[str, str, str]]:
         """Get folders, cached."""
@@ -52,6 +73,7 @@ class _SlashCompleter(Completer):
         self._note_cache.clear()
         self._todo_cache = None
         self._recent_notes_cache = None
+        self._db_names_cache = None
 
     def invalidate_notes(self) -> None:
         """Clear note cache after save/delete."""
@@ -63,12 +85,12 @@ class _SlashCompleter(Completer):
         self._recent_notes_cache = None
 
     def _get_open_todos(self) -> list[dict]:
-        """Get YOUR open action items. Cached until invalidated."""
+        """Get YOUR open todos. Cached until invalidated."""
         if self._todo_cache is None:
             try:
                 with Database(self._config.db_path) as db:
                     db.initialize()
-                    self._todo_cache = db.get_action_items_filtered(
+                    self._todo_cache = db.get_todos_filtered(
                         owner=self._config.user_name,
                     )
             except Exception:
@@ -76,11 +98,11 @@ class _SlashCompleter(Completer):
         return self._todo_cache
 
     def _get_done_todos(self) -> list[dict]:
-        """Get YOUR recently completed action items for /todo reopen."""
+        """Get YOUR recently completed todos for /todo reopen."""
         try:
             with Database(self._config.db_path) as db:
                 db.initialize()
-                return db.get_action_items_filtered(
+                return db.get_todos_filtered(
                     owner=self._config.user_name,
                     status="done",
                 )
@@ -103,8 +125,8 @@ class _SlashCompleter(Completer):
 
     def _get_notes_in_folder(
         self, space: str, group_slug: str
-    ) -> list[tuple[str, str]]:
-        """Get (title, date) for notes in a folder. Cached by space/group_slug."""
+    ) -> list[tuple[str, str, str]]:
+        """Get (id, title, date) for notes in a folder. Cached by space/group_slug."""
         cache_key = f"{space}/{group_slug}"
         if cache_key not in self._note_cache:
             try:
@@ -112,7 +134,7 @@ class _SlashCompleter(Completer):
                     db.initialize()
                     ctx = db.get_folder_context(space, group_slug)
                 self._note_cache[cache_key] = [
-                    (n["title"], n["date"])
+                    (n["id"], n["title"], n["date"])
                     for n in ctx.get("notes", [])
                 ]
             except Exception:
@@ -207,8 +229,8 @@ class _SlashCompleter(Completer):
             yield from self._folder_completions(text[8:])
             return
 
-        # Complete /list, /ideas, /ref — folder names
-        for prefix in ("/list ", "/ideas ", "/ref "):
+        # Complete /list, /ideas — folder names
+        for prefix in ("/list ", "/ideas "):
             if text.lower().startswith(prefix):
                 after = text[len(prefix):]
                 if " " not in after:
@@ -363,19 +385,103 @@ class _SlashCompleter(Completer):
                             )
             return
 
-        # Complete /delete and /edit — recent note IDs with titles
+        # Complete /<database> — subcommands + entity names for any known database
+        for db_name in self._get_database_names():
+            db_prefix = f"/{db_name} "
+            if text.lower().startswith(db_prefix):
+                after = text[len(db_prefix):]
+                if " " not in after:
+                    partial = after.lower()
+                    for sub, hint in (
+                        ("add", "add a record"),
+                        ("show", "show entity details"),
+                        ("delete", "delete a record"),
+                        ("search", "search records"),
+                    ):
+                        if sub.startswith(partial):
+                            yield Completion(sub, start_position=-len(after), display_meta=hint)
+                    # Entity names
+                    try:
+                        with Database(self._config.db_path) as db:
+                            db.initialize()
+                            records = db.get_database_records(db_name)
+                        seen: set[str] = set()
+                        for r in records:
+                            name = r["entity"]
+                            if name not in seen and (not partial or partial in name.lower()):
+                                seen.add(name)
+                                yield Completion(name, start_position=-len(after))
+                    except Exception:
+                        pass
+                else:
+                    words = after.split(None, 1)
+                    first = words[0].lower()
+                    rest = words[1] if len(words) > 1 else ""
+                    if first in ("show", "delete"):
+                        partial = rest.strip().lower()
+                        try:
+                            with Database(self._config.db_path) as db:
+                                db.initialize()
+                                records = db.get_database_records(db_name)
+                            seen: set[str] = set()
+                            for r in records:
+                                name = r["entity"]
+                                if name not in seen and (not partial or partial in name.lower()):
+                                    seen.add(name)
+                                    yield Completion(name, start_position=-len(rest))
+                        except Exception:
+                            pass
+                return
+
+        # Complete /delete and /edit — folder→note drill-down
+        # Typing flow: /delete → folders → pick folder → notes in that folder
+        # No trailing space on folders — user types / for subfolders or space for notes
         for prefix in ("/delete ", "/edit "):
             if text.lower().startswith(prefix):
-                partial = text[len(prefix):].strip().lower()
-                for note in self._get_recent_notes():
-                    nid = note["id"]
-                    if not partial or partial in nid.lower() or partial in note["title"].lower():
-                        meta = f"{note['title'][:50]} ({note['date']})"
+                after = text[len(prefix):]
+                words = after.split(None, 1)
+
+                # After a space: note ID filter within the resolved folder
+                if len(words) == 2 or (len(words) == 1 and after.endswith(" ")):
+                    folder_word = words[0]
+                    resolved = self._resolve_folder_from_word(folder_word)
+                    if resolved:
+                        space, group_slug = resolved
+                        partial_title = (words[1] if len(words) > 1 else "").lower()
+                        for nid, title, date in self._get_notes_in_folder(space, group_slug):
+                            if not partial_title or partial_title in title.lower():
+                                yield Completion(
+                                    nid,
+                                    start_position=-len(words[1]) if len(words) > 1 else 0,
+                                    display_meta=f"{title[:50]} ({date})",
+                                )
+                    return
+
+                # Still typing first word — show folders + notes for exact matches
+                partial = words[0] if words else ""
+                folder_key = partial.rstrip("/")
+
+                # If text exactly matches a folder, show notes from it
+                if folder_key and self._resolve_folder_from_word(folder_key):
+                    space, group_slug = self._resolve_folder_from_word(folder_key)
+                    for nid, title, date in self._get_notes_in_folder(space, group_slug):
                         yield Completion(
-                            nid,
-                            start_position=-len(text[len(prefix):]),
-                            display_meta=meta,
+                            f"{folder_key} {nid}",
+                            start_position=-len(partial),
+                            display_meta=f"{title[:50]} ({date})",
                         )
+
+                # Always show matching folders — append / to space-level entries
+                # so selecting "projects" becomes "projects/" for instant drill-down
+                for comp in self._folder_completions(partial):
+                    ctext = comp.text
+                    if "/" not in ctext:
+                        ctext += "/"
+                    yield Completion(
+                        ctext,
+                        start_position=comp.start_position,
+                        display_meta=comp.display_meta,
+                    )
                 return
 
         # Complete /workflow — subcommands + workflow names after pull
@@ -447,7 +553,7 @@ class _SlashCompleter(Completer):
                         at_pos = rest_text.rfind("@")
                         partial_title = rest_text[at_pos + 1:]
                         query = partial_title.lower()
-                        for title, date in self._get_notes_in_folder(space, group_slug):
+                        for _, title, date in self._get_notes_in_folder(space, group_slug):
                             if not query or query in title.lower():
                                 yield Completion(
                                     f"@{title}",
@@ -508,7 +614,7 @@ class _SlashCompleter(Completer):
                     at_pos = rest_text.rfind("@")
                     partial_title = rest_text[at_pos + 1:]
                     query = partial_title.lower()
-                    for title, date in self._get_notes_in_folder(space, group_slug):
+                    for _, title, date in self._get_notes_in_folder(space, group_slug):
                         if not query or query in title.lower():
                             yield Completion(
                                 f"@{title}",
@@ -526,6 +632,43 @@ class _SlashCompleter(Completer):
                         if not query or query in svc:
                             yield Completion(svc, start_position=-len(partial))
             return
+
+        # @note reference — folder→note autocomplete in the main prompt
+        # Type @ → folders, select folder + space → note titles in that folder
+        if not text.strip().startswith("/") and "@" in text:
+            yield from self._at_note_completions(text)
+            return
+
+    def _at_note_completions(self, text: str):
+        """Yield @note completions: folder first, then note titles."""
+        at_pos = text.rfind("@")
+        after_at = text[at_pos + 1:]
+        words = after_at.split(None, 1)
+
+        # Phase 1: folder completion (no words yet, or typing first word)
+        if not words or (len(words) == 1 and not after_at.endswith(" ")):
+            partial = words[0] if words else ""
+            for comp in self._folder_completions(partial):
+                yield Completion(
+                    comp.text,
+                    start_position=-len(after_at),
+                    display_meta=comp.display_meta,
+                )
+            return
+
+        # Phase 2: note title completion within the selected folder
+        folder_word = words[0]
+        resolved = self._resolve_folder_from_word(folder_word)
+        if resolved:
+            space, group_slug = resolved
+            partial_title = (words[1] if len(words) > 1 else "").lower()
+            for _, title, date in self._get_notes_in_folder(space, group_slug):
+                if not partial_title or partial_title in title.lower():
+                    yield Completion(
+                        title,
+                        start_position=-len(after_at),
+                        display_meta=date,
+                    )
 
 
 class _TodoItemCompleter(Completer):
@@ -674,6 +817,7 @@ class _TodoCommandCompleter(Completer):
 
     _COMMANDS = [
         ("done", "Mark a todo as done"),
+        ("delete", "Delete a todo permanently"),
         ("add", "Add a new todo"),
         ("today", "Flag items for today"),
         ("due", "View sorted by due date"),

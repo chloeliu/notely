@@ -695,15 +695,17 @@ def _make_chat_tool_handler(
             note = read_note(config, row["file_path"])
             if not note:
                 return {"error": f"Note file not found: {row['file_path']}"}
+            # Load action items from DB
+            note_actions = db.get_note_todos(note_id)
             return {
                 "id": note.id,
                 "title": note.title,
                 "date": note.date,
                 "body": note.body,
                 "action_items": [
-                    {"owner": a.owner, "task": a.task, "due": a.due,
-                     "status": a.status.value}
-                    for a in note.action_items
+                    {"owner": a["owner"], "task": a["task"], "due": a["due"],
+                     "status": a["status"]}
+                    for a in note_actions
                 ],
             }
 
@@ -747,10 +749,12 @@ def _chat_mode(config: NotelyConfig, query: str) -> None:
                 note = read_note(config, note_info["file_path"])
                 if note:
                     note_info["body"] = note.body
+                    # Load action items from DB
+                    note_actions = db.get_note_todos(note_info["id"])
                     note_info["action_items"] = [
-                        {"owner": a.owner, "task": a.task, "due": a.due,
-                         "status": a.status.value}
-                        for a in note.action_items
+                        {"owner": a["owner"], "task": a["task"], "due": a["due"],
+                         "status": a["status"]}
+                        for a in note_actions
                     ]
 
         # Step 3: Show banner

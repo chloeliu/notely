@@ -69,9 +69,9 @@ def _show_todos(
             else:
                 client = filter_arg
 
-        items = db.get_open_action_items(space=space, client=client)
+        items = db.get_open_todos(space=space)
 
-        # Filter by owner in Python (get_open_action_items doesn't have owner filter)
+        # Filter by owner in Python
         if owner:
             owner_lower = owner.lower()
             items = [i for i in items if owner_lower in (i.get("owner") or "").lower()]
@@ -82,7 +82,7 @@ def _show_todos(
             merged_any = _handle_todo_dedup(config, db, clusters)
             if merged_any:
                 # Re-fetch after merges
-                items = db.get_open_action_items(space=space, client=client)
+                items = db.get_open_todos(space=space)
                 if owner:
                     owner_lower = owner.lower()
                     items = [i for i in items if owner_lower in (i.get("owner") or "").lower()]
@@ -98,15 +98,11 @@ def _show_todos(
     console.print(f"\n[bold]{label}[/bold]\n")
 
     for item in items:
-        meta = safe_json_loads(item["space_metadata"])
-        group = meta.get("client_display") or meta.get("client") or meta.get("category_display") or ""
         title = item.get("note_title", "(standalone)")
-        if title == "(standalone)":
-            from_str = ""
-        elif group:
-            from_str = group
-        else:
-            from_str = title
+        space = item.get("space", "")
+        group_slug = item.get("group_slug", "")
+        folder = f"{space}/{group_slug}" if group_slug else space
+        from_str = folder if title == "(standalone)" else title
 
         # Line 1: ID + task (full text, no truncation)
         console.print(f"  [dim]#{item['id']}[/dim]  {item['task']}")
@@ -461,105 +457,161 @@ def _timer_dispatch(config: NotelyConfig, arg: str) -> None:
     console.print("[dim]Try: /timer start, /timer stop, /timer add, /timer log[/dim]")
 
 
-def _show_references(config: NotelyConfig, arg: str) -> None:
-    """View, search, add, or delete reference data (account numbers, NPIs, phones, etc.)."""
-    from ...storage import sync_references_index
+def _handle_database_command(
+    config: NotelyConfig,
+    db_name: str,
+    arg: str,
+    working_folder: dict | None = None,
+) -> None:
+    """Handle /<database> commands — thin dispatcher.
 
-    parts = arg.strip().split(None, 2) if arg.strip() else []
+    No arg → enter interactive mode.
+    Subcommands (add, delete, show, search) → quick one-liners.
+    Bare text → search/filter.
+    """
+    from ...storage import sync_database_indexes
+
+    if not arg.strip():
+        # Enter interactive mode
+        from ._database_mode import _database_mode
+        _database_mode(config, db_name, working_folder)
+        return
+
+    parts = arg.strip().split(None, 2)
+    subcmd = parts[0].lower() if parts else ""
+
+    wf_space = (working_folder or {}).get("space", "")
+    wf_group = (working_folder or {}).get("group_slug", "")
 
     with Database(config.db_path) as db:
         db.initialize()
 
-        # /ref delete ID — delete a reference
-        if len(parts) >= 2 and parts[0].lower() == "delete":
+        # /<db> drop — delete entire database
+        if subcmd == "drop":
+            try:
+                from rich.prompt import Prompt as RPrompt
+                confirm = RPrompt.ask(
+                    f"[red]Delete ALL records in '{db_name}'? This cannot be undone.[/red]",
+                    choices=["y", "n"], default="n",
+                )
+            except (KeyboardInterrupt, EOFError):
+                return
+            if confirm != "y":
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            count = db.delete_database(db_name)
+            sync_database_indexes(config, db)
+            console.print(f"[green]Deleted {count} record(s). Database '{db_name}' removed.[/green]")
+            return
+
+        # /<db> delete ID
+        if subcmd == "delete" and len(parts) >= 2:
             try:
                 ref_id = int(parts[1])
             except ValueError:
-                console.print("[yellow]Usage: /ref delete ID[/yellow]")
+                console.print(f"[yellow]Usage: /{db_name} delete ID[/yellow]")
                 return
             if db.delete_reference(ref_id):
-                console.print(f"[green]Deleted reference #{ref_id}.[/green]")
-                sync_references_index(config, db)
+                console.print(f"[green]Deleted record #{ref_id}.[/green]")
+                sync_database_indexes(config, db)
             else:
-                console.print(f"[yellow]No reference with ID {ref_id}.[/yellow]")
+                console.print(f"[yellow]No record with ID {ref_id}.[/yellow]")
             return
 
-        # /ref add entity key value — manual add (to working folder if set)
-        if len(parts) >= 3 and parts[0].lower() == "add":
-            # Re-split after "add"
+        # /<db> add ENTITY key value
+        if subcmd == "add":
             add_parts = arg.strip().split(None, 3)
             if len(add_parts) < 4:
-                console.print("[yellow]Usage: /ref add entity key value[/yellow]")
+                console.print(f"[yellow]Usage: /{db_name} add ENTITY key value[/yellow]")
                 return
             entity, key, value = add_parts[1], add_parts[2], add_parts[3]
-            ref_id = db.add_reference(entity=entity, key=key, value=value)
-            console.print(f"[green]Saved:[/green] {entity}.{key} = {value} (#{ref_id})")
-            sync_references_index(config, db)
+            # Confirm new database creation on first record
+            if not db.database_exists(db_name):
+                from ._shared import _confirm_new_database
+                if not _confirm_new_database(config, db_name):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+            ref_id = db.add_reference(
+                entity=entity, key=key, value=value,
+                snippet_type=db_name,
+                space=wf_space, group_slug=wf_group,
+            )
+            scope = f" ({wf_space}/{wf_group})" if wf_space else ""
+            console.print(f"[green]Saved:[/green] {entity}.{key} = {value}{scope} (#{ref_id})")
+            sync_database_indexes(config, db)
             return
 
-        # /ref entity key value — inline add (backwards compat)
+        # /<db> show ENTITY — detailed view
+        if subcmd == "show" and len(parts) >= 2:
+            name = " ".join(parts[1:])
+            recs = db.get_database_records(db_name, entity=name)
+            if not recs:
+                console.print(f"[yellow]No records for '{name}' in {db_name}.[/yellow]")
+                return
+            entity = recs[0]["entity"]
+            console.print(f"\n  [bold]{entity}[/bold]")
+            for f in recs:
+                console.print(f"    {f['key']}: [cyan]{f['value']}[/cyan]  [dim]#{f['id']}[/dim]")
+                if f.get("description"):
+                    console.print(f"      [dim]{f['description']}[/dim]")
+            # Contacts get interaction history
+            if db_name == "contacts":
+                interactions = db.get_contact_interactions(entity, limit=10)
+                if interactions:
+                    console.print(f"\n  [bold]Recent Interactions[/bold]")
+                    for n in interactions:
+                        console.print(f"    {n['date']}  [cyan]{n['title']}[/cyan]  [dim]#{n['id']}[/dim]")
+                else:
+                    console.print(f"\n  [dim]No notes mentioning {entity}.[/dim]")
+            console.print()
+            return
+
+        # /<db> ENTITY key value — inline add
         if len(parts) >= 3:
             entity, key, value = parts[0], parts[1], parts[2]
-            ref_id = db.add_reference(entity=entity, key=key, value=value)
+            # Confirm new database creation on first record
+            if not db.database_exists(db_name):
+                from ._shared import _confirm_new_database
+                if not _confirm_new_database(config, db_name):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+            ref_id = db.add_reference(
+                entity=entity, key=key, value=value,
+                snippet_type=db_name,
+                space=wf_space, group_slug=wf_group,
+            )
             console.print(f"[green]Saved:[/green] {entity}.{key} = {value} (#{ref_id})")
-            sync_references_index(config, db)
+            sync_database_indexes(config, db)
             return
 
-        # /ref entity key — missing value, prompt for it
-        if len(parts) == 2:
-            entity, key = parts[0], parts[1]
-            value = Prompt.ask("[dim]Value[/dim]").strip()
-            if not value:
-                console.print("[yellow]Cancelled.[/yellow]")
-                return
-            ref_id = db.add_reference(entity=entity, key=key, value=value)
-            console.print(f"[green]Saved:[/green] {entity}.{key} = {value} (#{ref_id})")
-            sync_references_index(config, db)
+        # /<db> QUERY — FTS search or entity filter
+        query = arg.strip()
+        results = db.search_references(query)
+        results = [r for r in results if r.get("snippet_type") == db_name]
+        if not results:
+            results = db.get_database_records(db_name, entity=query)
+        if not results:
+            console.print(f"[yellow]No results for '{query}' in {db_name}.[/yellow]")
+            console.print(f"[dim]Use /{db_name} add ENTITY key value to add one.[/dim]")
             return
-
-        # /ref QUERY — FTS search or entity filter
-        if len(parts) == 1:
-            query = parts[0]
-            # Try FTS search first
-            results = db.search_references(query)
-            if not results:
-                # Try entity filter
-                results = db.get_references(entity=query)
-            if not results:
-                console.print(f"[yellow]No references matching '{query}'.[/yellow]")
-                console.print("[dim]Use /ref entity key value to add one.[/dim]")
-                return
-            # Group by entity for display
-            by_entity: dict[str, list] = {}
-            for r in results:
-                by_entity.setdefault(r["entity"], []).append(r)
-            for entity, refs in sorted(by_entity.items()):
-                console.print(f"  [bold]{entity}[/bold]")
-                for r in refs:
-                    stype = f" [{r['snippet_type']}]" if r["snippet_type"] != "fact" else ""
-                    console.print(f"    {r['key']}: [cyan]{r['value']}[/cyan]{stype}  [dim]#{r['id']}[/dim]")
-                    if r.get("description"):
-                        console.print(f"      [dim]{r['description']}[/dim]")
-            return
-
-        # /ref — show all references
-        all_refs = db.get_references()
-        if not all_refs:
-            console.print("[dim]No references stored yet.[/dim]")
-            console.print("[dim]Use: /ref entity key value[/dim]")
-            console.print("[dim]  e.g. /ref labcorp account_number 12345678[/dim]")
-            return
-
         by_entity: dict[str, list] = {}
-        for r in all_refs:
+        for r in results:
             by_entity.setdefault(r["entity"], []).append(r)
         for entity, refs in sorted(by_entity.items()):
             console.print(f"  [bold]{entity}[/bold]")
             for r in refs:
-                stype = f" [{r['snippet_type']}]" if r["snippet_type"] != "fact" else ""
-                console.print(f"    {r['key']}: [cyan]{r['value']}[/cyan]{stype}  [dim]#{r['id']}[/dim]")
+                console.print(f"    {r['key']}: [cyan]{r['value']}[/cyan]  [dim]#{r['id']}[/dim]")
                 if r.get("description"):
                     console.print(f"      [dim]{r['description']}[/dim]")
+
+
+# Legacy aliases for backward compatibility
+def _show_references(config: NotelyConfig, arg: str) -> None:
+    _handle_database_command(config, "references", arg)
+
+
+def _show_contacts(config: NotelyConfig, arg: str, working_folder: dict | None = None) -> None:
+    _handle_database_command(config, "contacts", arg, working_folder)
 
 
 _AGENT_YAML_TEMPLATE = """\
@@ -699,7 +751,7 @@ def _mark_done(config: NotelyConfig, arg: str) -> None:
     with Database(config.db_path) as db:
         db.initialize()
 
-        row = db.get_action_item(item_id)
+        row = db.get_todo(item_id)
 
         if not row:
             console.print(f"[red]No todo with ID {item_id}.[/red]")
@@ -728,7 +780,7 @@ def _reopen_todo(config: NotelyConfig, arg: str) -> None:
     with Database(config.db_path) as db:
         db.initialize()
 
-        row = db.get_action_item(item_id)
+        row = db.get_todo(item_id)
 
         if not row:
             console.print(f"[red]No todo with ID {item_id}.[/red]")
@@ -859,7 +911,7 @@ def _delete_note(config: NotelyConfig, note_id: str) -> None:
         console.print(f"  [bold]{row['title']}[/bold]")
         console.print(f"  [dim]{row['space']} / {row['date']} / {row['file_path']}[/dim]")
         from ...prompts import confirm_destructive
-        if not confirm_destructive("Delete this note?"):
+        if not confirm_destructive("Delete this note?", default_no=False):
             console.print("[dim]Cancelled.[/dim]")
             return
 

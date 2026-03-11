@@ -32,11 +32,6 @@ class ContentStatus(str, Enum):
     USED = "used"
 
 
-class SnippetType(str, Enum):
-    IDENTIFIER = "identifier"  # NPI, account number, member ID
-    BOOKMARK = "bookmark"      # URL with description
-    FACT = "fact"              # Quick fact, relationship, preference
-
 
 class ActionItem(BaseModel):
     owner: str
@@ -63,7 +58,6 @@ class Note(BaseModel):
     file_path: str = ""
     body: str = ""
     raw_text: str = ""
-    action_items: list[ActionItem] = Field(default_factory=list)
     related_contexts: list[str] = Field(default_factory=list)
     source_url: str = ""
     attachments: list[str] = Field(default_factory=list)
@@ -130,7 +124,7 @@ class Snippet(BaseModel):
     key: str = ""         # label: "npi", "docs_url", "ehr_platform"
     value: str = ""       # the data: "9876543210", "https://...", "Canvas Medical"
     description: str = ""  # optional context
-    snippet_type: SnippetType = SnippetType.FACT
+    snippet_type: str = "fact"
     tags: list[str] = Field(default_factory=list)
     created: str = ""
     note_id: str | None = None  # linked note (if extracted from a note)
@@ -143,6 +137,7 @@ class AIStructuredOutput(BaseModel):
     metadata: AIMetadata
     body_markdown: str
     related_contexts: list[str] = Field(default_factory=list)
+    extracted_records: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AIMetadata(BaseModel):

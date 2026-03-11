@@ -237,7 +237,7 @@ ADD_SNIPPET_TOOL = {
                         },
                         "key": {
                             "type": "string",
-                            "description": "Label: 'npi', 'docs_url', 'ehr_platform', 'api_key_location'",
+                            "description": "Field name. Reuse existing field names from the database when they fit (e.g. if 'phone' exists, use 'phone' not 'phone_number'). New fields are fine when genuinely new — just don't create synonyms of existing ones.",
                         },
                         "value": {
                             "type": "string",
@@ -249,8 +249,7 @@ ADD_SNIPPET_TOOL = {
                         },
                         "snippet_type": {
                             "type": "string",
-                            "enum": ["identifier", "bookmark", "fact"],
-                            "description": "Type: identifier (NPI, account #), bookmark (URL), fact (quick knowledge)",
+                            "description": "Database name to store in (lowercase slug). Use an existing database if listed under 'Known databases' in the system prompt. Otherwise suggest a sensible name based on the data type (e.g. 'providers', 'accounts', 'locations').",
                         },
                         "tags": {
                             "type": "array",
@@ -268,10 +267,10 @@ ADD_SNIPPET_TOOL = {
 # Tool definition for structured output
 STRUCTURE_NOTE_TOOL = {
     "name": "save_structured_note",
-    "description": "Save a structured note with routing, metadata, and body content.",
+    "description": "Save a structured note with routing, metadata, and body content. IMPORTANT: All action items, tasks, next steps, and follow-ups MUST go into extracted_records, NOT in the body.",
     "input_schema": {
         "type": "object",
-        "required": ["routing", "metadata", "body_markdown"],
+        "required": ["routing", "metadata", "body_markdown", "extracted_records"],
         "properties": {
             "routing": {
                 "type": "object",
@@ -374,6 +373,26 @@ STRUCTURE_NOTE_TOOL = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Cross-references to other spaces/groups this note relates to, as paths like 'clients/acme-corp/api-project' or 'ideas/thought-leadership'",
+            },
+            "extracted_records": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["entity", "snippet_type"],
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity name or task text for todos",
+                        },
+                        "key": {"type": "string", "description": "Field name. Not needed for todos."},
+                        "value": {"type": "string", "description": "The data value. Not needed for todos."},
+                        "snippet_type": {"type": "string", "description": "Database name: 'todo' for action items, or a known database name"},
+                        "description": {"type": "string"},
+                        "owner": {"type": "string", "description": "For todos only: who owns this task"},
+                        "due": {"type": ["string", "null"], "description": "For todos only: due date YYYY-MM-DD"},
+                    },
+                },
+                "description": "REQUIRED. Every action item, task, next step, or follow-up MUST be here — never in the body. Use snippet_type='todo' for action items (entity=task text, owner, due). Use other snippet_types for database records. Return empty array [] if none.",
             },
         },
     },
@@ -509,17 +528,50 @@ def _build_system_prompt(
         taxonomy=json.dumps(taxonomy, indent=2),
         todays_notes_str=todays_notes_str,
         size_guidance=size_guidance.get(input_size, size_guidance[InputSize.MEDIUM]),
+        databases_str=_build_databases_str(workspace_path),
     )
+
+
+EXTRACT_RECORDS_TOOL = {
+    "name": "extract_records",
+    "description": "Extract only database records (action items, contacts, etc.) from the text WITHOUT creating a note. Use this when the user explicitly asks to extract records only — not to structure a full note.",
+    "input_schema": {
+        "type": "object",
+        "required": ["extracted_records"],
+        "properties": {
+            "extracted_records": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["entity", "snippet_type"],
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity name or task text for todos",
+                        },
+                        "key": {"type": "string", "description": "Field name. Not needed for todos."},
+                        "value": {"type": "string", "description": "The data value. Not needed for todos."},
+                        "snippet_type": {"type": "string", "description": "Database name: 'todo' for action items, or a known database name"},
+                        "description": {"type": "string"},
+                        "owner": {"type": "string", "description": "For todos only: who owns this task"},
+                        "due": {"type": ["string", "null"], "description": "For todos only: due date YYYY-MM-DD"},
+                    },
+                },
+                "description": "Records to extract: use snippet_type='todo' for action items (entity=task text, owner, due). Use other snippet_types for database records (entity, key, value).",
+            },
+        },
+    },
+}
 
 
 ## --- New structuring-only tools (no routing) ---
 
 STRUCTURE_ONLY_TOOL = {
     "name": "structure_note",
-    "description": "Structure raw text into an organized note with metadata and body content. Routing has already been decided — just structure the content.",
+    "description": "Structure raw text into an organized note with metadata and body content. Routing has already been decided — just structure the content. IMPORTANT: All action items, tasks, next steps, and follow-ups MUST go into extracted_records, NOT in the body.",
     "input_schema": {
         "type": "object",
-        "required": ["metadata", "body_markdown"],
+        "required": ["metadata", "body_markdown", "extracted_records"],
         "properties": {
             "metadata": {
                 "type": "object",
@@ -563,7 +615,7 @@ STRUCTURE_ONLY_TOOL = {
                                 "due": {"type": ["string", "null"]},
                             },
                         },
-                        "description": "Action items with owner and optional due date",
+                        "description": "Action items with owner and optional due date (legacy — prefer extracted_records with snippet_type='todo')",
                     },
                     "extra": {
                         "type": "object",
@@ -580,6 +632,43 @@ STRUCTURE_ONLY_TOOL = {
                 "items": {"type": "string"},
                 "description": "Cross-references to other spaces/groups this note relates to",
             },
+            "extracted_records": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["entity", "snippet_type"],
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity name or task text for todos",
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Field name (e.g. 'npi', 'phone'). Not needed for todos.",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "The data value. Not needed for todos.",
+                        },
+                        "snippet_type": {
+                            "type": "string",
+                            "description": "Database name: 'todo' for action items, or a known database name like 'contacts'",
+                        },
+                        "description": {
+                            "type": "string",
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "For todos only: who owns this task",
+                        },
+                        "due": {
+                            "type": ["string", "null"],
+                            "description": "For todos only: due date YYYY-MM-DD",
+                        },
+                    },
+                },
+                "description": "REQUIRED. Every action item, task, next step, or follow-up MUST be here — never in the body. Use snippet_type='todo' for action items (entity=task text, owner, due). Use other snippet_types for database records (entity, key, value). Return empty array [] if no records to extract.",
+            },
         },
     },
 }
@@ -589,7 +678,7 @@ MERGE_NOTE_TOOL = {
     "description": "Merge new content into an existing note, producing an updated body and metadata.",
     "input_schema": {
         "type": "object",
-        "required": ["updated_body", "updated_summary"],
+        "required": ["updated_body", "updated_summary", "extracted_records"],
         "properties": {
             "updated_body": {
                 "type": "string",
@@ -615,20 +704,136 @@ MERGE_NOTE_TOOL = {
                         "due": {"type": ["string", "null"]},
                     },
                 },
-                "description": "New action items extracted from the new content",
+                "description": "New action items from the new content (legacy — prefer extracted_records with snippet_type='todo')",
             },
             "new_participants": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Additional participants to add",
             },
+            "extracted_records": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["entity", "snippet_type"],
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity name or task text for todos",
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Field name (e.g. 'npi', 'phone'). Not needed for todos.",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "The data value. Not needed for todos.",
+                        },
+                        "snippet_type": {
+                            "type": "string",
+                            "description": "Database name: 'todo' for action items, or a known database name like 'contacts'",
+                        },
+                        "description": {
+                            "type": "string",
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "For todos only: who owns this task",
+                        },
+                        "due": {
+                            "type": ["string", "null"],
+                            "description": "For todos only: due date YYYY-MM-DD",
+                        },
+                    },
+                },
+                "description": "REQUIRED. Every NEW action item, task, next step, or follow-up from the new content MUST be here — never in the body. Use snippet_type='todo' for action items. Return empty array [] if none.",
+            },
         },
     },
 }
 
 
-def _build_existing_note_str(existing_note: Any) -> str:
-    """Build the existing note context string for merge prompts."""
+def _build_databases_str(workspace_path: Path | str | None) -> str:
+    """Build a compact database catalog for AI snippet_type guidance.
+
+    Lists database names, descriptions, and field names only.
+    Entity matching is handled post-AI via fuzzy check — no entity
+    lists in the prompt (doesn't scale).
+    """
+    from .config import find_notely_root
+    from .db import Database
+
+    names: set[str] = set()
+    db_keys: dict[str, list[str]] = {}  # db_name → known field keys
+    db_descs: dict[str, str] = {}  # db_name → user description
+    db_extract: set[str] = set()  # databases that extract from notes
+    try:
+        root = find_notely_root() if workspace_path is None else Path(workspace_path)
+        db_path = root / "index.db"
+        if db_path.exists():
+            with Database(db_path) as db:
+                db.initialize()
+                names |= set(db.get_database_names())
+                for n in names:
+                    fields = db.get_database_fields(n)
+                    if fields:
+                        db_keys[n] = fields
+                    desc = db.get_database_description(n)
+                    if desc:
+                        db_descs[n] = desc
+                    if db.get_database_meta(n, "extract_from_notes") == "true":
+                        db_extract.add(n)
+    except Exception:
+        pass
+
+    # Build catalog: one line per database (name + description + fields)
+    # No entity lists — entity matching happens post-AI via fuzzy check
+    all_dbs = sorted(names)
+    if not any(n in db_keys or n in db_descs for n in all_dbs):
+        return ""
+
+    # Separate extract-from-notes databases from snippet-only databases
+    extract_dbs = [n for n in all_dbs if n in db_extract]
+    snippet_dbs = [n for n in all_dbs if n not in db_extract]
+
+    lines: list[str] = []
+
+    if extract_dbs:
+        lines.append("Databases to auto-extract from notes (use extracted_records):")
+        for n in extract_dbs:
+            parts = [f"\"{n}\""]
+            if n in db_descs:
+                parts.append(db_descs[n])
+            if n in db_keys:
+                parts.append(f"fields: {', '.join(db_keys[n][:8])}")
+            if n == "todo":
+                parts.append("entity = task text, use owner/due fields (not key/value)")
+            lines.append(f"- {' — '.join(parts)}")
+        lines.append("\nWhen structuring a note, extract matching records into extracted_records. For todos: snippet_type='todo', entity=task text, owner, due. For others: entity, key, value, snippet_type.")
+
+    if snippet_dbs:
+        lines.append("\nKnown databases (use matching snippet_type for add_snippet):")
+        for n in snippet_dbs:
+            parts = [f"\"{n}\""]
+            if n in db_descs:
+                parts.append(db_descs[n])
+            if n in db_keys:
+                parts.append(f"fields: {', '.join(db_keys[n][:8])}")
+            lines.append(f"- {' — '.join(parts)}")
+
+    if db_keys:
+        lines.append("\nReuse existing field names — don't create synonyms (use 'phone' not 'phone_number'). New fields are fine when genuinely different.")
+    return "\n".join(lines)
+
+
+def _build_existing_note_str(existing_note: Any, action_items: list | None = None) -> str:
+    """Build the existing note context string for merge prompts.
+
+    Args:
+        existing_note: the Note object
+        action_items: list of action item dicts from DB (optional).
+            If not provided, no action items section is included.
+    """
     existing_sections = []
 
     existing_sections.append(f"**Title:** {existing_note.title}")
@@ -641,12 +846,17 @@ def _build_existing_note_str(existing_note: Any) -> str:
     if existing_note.participants:
         existing_sections.append(f"**Participants (already listed):** {', '.join(existing_note.participants)}")
 
-    if existing_note.action_items:
+    if action_items:
         action_lines = []
-        for item in existing_note.action_items:
-            due_str = f" (due {item.due})" if item.due else ""
-            status = item.status.value if hasattr(item.status, "value") else item.status
-            action_lines.append(f"  - [{status}] {item.owner}: {item.task}{due_str}")
+        for item in action_items:
+            due = item.get("due") if isinstance(item, dict) else getattr(item, "due", None)
+            due_str = f" (due {due})" if due else ""
+            owner = item.get("owner", "") if isinstance(item, dict) else getattr(item, "owner", "")
+            task = item.get("task", "") if isinstance(item, dict) else getattr(item, "task", "")
+            status = item.get("status", "open") if isinstance(item, dict) else getattr(item, "status", "open")
+            if hasattr(status, "value"):
+                status = status.value
+            action_lines.append(f"  - [{status}] {owner}: {task}{due_str}")
         existing_sections.append("**Action items (already tracked):**\n" + "\n".join(action_lines))
 
     existing_sections.append(f"\n**Body:**\n{existing_note.body or '(empty)'}")
@@ -661,6 +871,7 @@ def _build_structuring_prompt(
     mode: str = "new",
     existing_note: Any | None = None,
     workspace_path: Path | str | None = None,
+    action_items: list | None = None,
 ) -> str:
     """Build a focused system prompt for structuring only (no routing).
 
@@ -669,6 +880,7 @@ def _build_structuring_prompt(
 
     For merge mode, existing_note should be the full Note object so the AI
     sees everything: body, summary, action items, tags, participants.
+    action_items is a list of action item dicts from DB (for merge mode).
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -701,7 +913,7 @@ def _build_structuring_prompt(
         space_info = f"\n## Target Space Configuration\n\n{json.dumps(space_config, indent=2)}\n"
 
     if mode == "merge" and existing_note is not None:
-        existing_note_str = _build_existing_note_str(existing_note)
+        existing_note_str = _build_existing_note_str(existing_note, action_items=action_items)
         template = load_template(workspace_path, MERGER)
         return template.format(
             today=today,
@@ -716,6 +928,7 @@ def _build_structuring_prompt(
         user_str=user_str,
         space_info=space_info,
         size_guidance=size_guidance.get(input_size, size_guidance[InputSize.MEDIUM]),
+        databases_str=_build_databases_str(workspace_path),
     )
 
 
@@ -727,6 +940,7 @@ def structure_only(
     user_name: str | None = None,
     user_instruction: str | None = None,
     workspace_path: Path | str | None = None,
+    existing_records: list[dict[str, Any]] | None = None,
 ) -> AIStructuredOutput:
     """Send raw text to the Claude API for structuring into a note (no routing).
 
@@ -749,6 +963,9 @@ def structure_only(
             to focus on or how to structure the note. Sent as a separate directive
             so the AI treats it as guidance, not content.
         workspace_path: Path to the notely workspace for loading user templates.
+        existing_records: If provided, records already extracted from this note
+            (from a previous extraction). Included in the prompt so the AI avoids
+            re-extracting the same data with different wording.
 
     Returns:
         AIStructuredOutput with metadata (title, summary, tags, action_items, etc.)
@@ -766,22 +983,45 @@ def structure_only(
         workspace_path=workspace_path,
     )
 
+    # Build context about already-extracted records
+    existing_records_ctx = ""
+    if existing_records:
+        lines = ["ALREADY EXTRACTED RECORDS (do NOT re-extract these — they are already saved):"]
+        for rec in existing_records:
+            stype = rec.get("snippet_type", "")
+            if stype == "todo":
+                owner = rec.get("owner", "")
+                task = rec.get("task", rec.get("entity", ""))
+                due = rec.get("due", "")
+                owner_str = f"{owner}: " if owner else ""
+                due_str = f" (due {due})" if due else ""
+                lines.append(f"  - todo: {owner_str}{task}{due_str}")
+            else:
+                entity = rec.get("entity", "")
+                key = rec.get("key", "")
+                value = rec.get("value", "")
+                lines.append(f"  - {stype}: {entity}.{key} = {value}")
+        existing_records_ctx = "\n".join(lines) + "\n\n"
+
     if user_instruction:
         user_msg = (
             f"USER INSTRUCTION: {user_instruction}\n\n"
+            f"{existing_records_ctx}"
             f"---\n\n"
             f"{raw_text}"
         )
     else:
         user_msg = (
-            f"Structure this input into a note.\n\n{raw_text}"
+            f"Structure this input into a note.\n\n"
+            f"{existing_records_ctx}"
+            f"{raw_text}"
         )
 
     response = client.messages.create(
         model="claude-sonnet-4-5-20250929",
         max_tokens=4096,
         system=system,
-        tools=[STRUCTURE_ONLY_TOOL, ADD_LIST_ITEM_TOOL, ADD_SNIPPET_TOOL],
+        tools=[STRUCTURE_ONLY_TOOL, ADD_LIST_ITEM_TOOL, ADD_SNIPPET_TOOL, EXTRACT_RECORDS_TOOL],
         tool_choice={"type": "any"},
         messages=[{"role": "user", "content": user_msg}],
     )
@@ -794,6 +1034,8 @@ def structure_only(
                 raise ListItemResult(block.input)
             elif block.name == "add_snippet":
                 raise SnippetResult(block.input)
+            elif block.name == "extract_records":
+                raise RecordsOnlyResult(block.input)
 
     raise ValueError("AI did not return structured output via tool_use")
 
@@ -820,6 +1062,16 @@ class SnippetResult(Exception):
         super().__init__("AI chose snippet")
 
 
+class RecordsOnlyResult(Exception):
+    """Exception to signal AI chose extract_records instead of note.
+
+    Raised when the user asks to extract records only (no note structuring).
+    Caught across module boundaries (ai.py → open_cmd.py, dump.py).
+    """
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+        super().__init__("AI chose records only")
 
 
 def merge_with_existing(
@@ -829,6 +1081,7 @@ def merge_with_existing(
     input_size: InputSize,
     user_name: str | None = None,
     workspace_path: Path | str | None = None,
+    action_items: list | None = None,
 ) -> dict[str, Any]:
     """Send raw text + the full existing Note to Claude for intelligent merging.
 
@@ -846,6 +1099,7 @@ def merge_with_existing(
         input_size: InputSize enum (SMALL/MEDIUM/LARGE) to guide AI verbosity.
         user_name: If set, the AI uses this name for action item owners.
         workspace_path: Path to the notely workspace for loading user templates.
+        action_items: List of action item dicts from DB for the existing note.
 
     Returns:
         Dict with keys:
@@ -865,6 +1119,7 @@ def merge_with_existing(
         mode="merge",
         existing_note=existing_note,
         workspace_path=workspace_path,
+        action_items=action_items,
     )
 
     response = client.messages.create(
@@ -879,20 +1134,35 @@ def merge_with_existing(
     for block in response.content:
         if block.type == "tool_use" and block.name == "merge_note":
             data = block.input
-            # Parse action items
+
+            # Parse extracted_records — split todos from other database records
             action_items = []
+            extracted_records = []
+            for rec in data.get("extracted_records", []):
+                if rec.get("snippet_type") == "todo":
+                    action_items.append(ActionItem(
+                        owner=rec.get("owner", "me"),
+                        task=rec["entity"],
+                        due=rec.get("due"),
+                    ))
+                else:
+                    extracted_records.append(rec)
+
+            # Backward compat: also parse legacy new_action_items
             for item in data.get("new_action_items", []):
                 action_items.append(ActionItem(
                     owner=item["owner"],
                     task=item["task"],
                     due=item.get("due"),
                 ))
+
             return {
                 "updated_body": data["updated_body"],
                 "updated_summary": data["updated_summary"],
                 "new_tags": data.get("new_tags", []),
                 "new_action_items": action_items,
                 "new_participants": data.get("new_participants", []),
+                "new_extracted_records": extracted_records,
             }
 
     raise ValueError("AI did not return merge output via tool_use")
@@ -904,6 +1174,7 @@ def revise_note(
     space_config: dict[str, Any],
     input_size: InputSize,
     user_name: str | None = None,
+    action_items: list | None = None,
 ) -> AIStructuredOutput:
     """Re-structure an existing note based on user revision instructions.
 
@@ -950,12 +1221,20 @@ def revise_note(
         note_sections.append(f"**Tags:** {', '.join(note.tags)}")
     if note.participants:
         note_sections.append(f"**Participants:** {', '.join(note.participants)}")
-    if note.action_items:
+    if action_items:
         action_lines = []
-        for item in note.action_items:
-            due_str = f" (due {item.due})" if item.due else ""
-            status = item.status.value if hasattr(item.status, "value") else item.status
-            action_lines.append(f"  - [{status}] {item.owner}: {item.task}{due_str}")
+        for item in action_items:
+            if isinstance(item, dict):
+                due_str = f" (due {item.get('due', '')})" if item.get("due") else ""
+                status = item.get("status", "open")
+                owner = item.get("owner", "")
+                task = item.get("task", "")
+            else:
+                due_str = f" (due {item.due})" if item.due else ""
+                status = item.status.value if hasattr(item.status, "value") else item.status
+                owner = item.owner
+                task = item.task
+            action_lines.append(f"  - [{status}] {owner}: {task}{due_str}")
         note_sections.append("**Action items:**\n" + "\n".join(action_lines))
     note_sections.append(f"\n**Body:**\n{note.body or '(empty)'}")
     note_str = "\n".join(note_sections)
@@ -1061,10 +1340,26 @@ def _parse_structure_only_output(data: dict[str, Any]) -> AIStructuredOutput:
     """Parse the structure_note tool output into AIStructuredOutput.
 
     Uses a dummy routing since routing is handled externally.
+    Splits extracted_records into todos (→ metadata.action_items) and
+    other records (→ extracted_records) for backward compat.
     """
     meta_data = data["metadata"]
 
     action_items = []
+    extracted_records = []
+
+    # Parse extracted_records — split todos from other database records
+    for rec in data.get("extracted_records", []):
+        if rec.get("snippet_type") == "todo":
+            action_items.append(ActionItem(
+                owner=rec.get("owner", "me"),
+                task=rec["entity"],
+                due=rec.get("due"),
+            ))
+        else:
+            extracted_records.append(rec)
+
+    # Backward compat: also parse legacy action_items if present
     for item in meta_data.get("action_items", []):
         action_items.append(ActionItem(
             owner=item["owner"],
@@ -1095,6 +1390,7 @@ def _parse_structure_only_output(data: dict[str, Any]) -> AIStructuredOutput:
         metadata=metadata,
         body_markdown=data["body_markdown"],
         related_contexts=data.get("related_contexts", []),
+        extracted_records=extracted_records,
     )
 
 
@@ -1169,6 +1465,20 @@ def _parse_ai_output(data: dict[str, Any]) -> AIStructuredOutput:
     meta_data = data["metadata"]
 
     action_items = []
+    extracted_records = []
+
+    # Parse extracted_records — split todos from other database records
+    for rec in data.get("extracted_records", []):
+        if rec.get("snippet_type") == "todo":
+            action_items.append(ActionItem(
+                owner=rec.get("owner", "me"),
+                task=rec["entity"],
+                due=rec.get("due"),
+            ))
+        else:
+            extracted_records.append(rec)
+
+    # Backward compat: also parse legacy action_items
     for item in meta_data.get("action_items", []):
         action_items.append(ActionItem(
             owner=item["owner"],
@@ -1204,6 +1514,7 @@ def _parse_ai_output(data: dict[str, Any]) -> AIStructuredOutput:
         metadata=metadata,
         body_markdown=data["body_markdown"],
         related_contexts=data.get("related_contexts", []),
+        extracted_records=extracted_records,
     )
 
 
@@ -1318,22 +1629,40 @@ def _build_chat_system_prompt(
             "and get_note_body to read full details.*"
         )
 
-    # References (from DB — folder-scoped lookup data)
-    if references:
-        parts.append("\n## References")
-        if isinstance(references, list):
-            # DB format: list of dicts with entity/key/value/description/snippet_type
-            by_entity: dict[str, list[dict]] = {}
-            for r in references:
-                by_entity.setdefault(r["entity"], []).append(r)
-            for entity, refs in sorted(by_entity.items()):
-                items_str = ", ".join(f"{r['key']}: {r['value']}" for r in refs)
-                parts.append(f"- **{entity}**: {items_str}")
-        else:
-            # Legacy TOML format: dict of entity -> {key: value}
-            for entity, kvs in sorted(references.items()):
-                items_str = ", ".join(f"{k}: {v}" for k, v in kvs.items())
-                parts.append(f"- **{entity}**: {items_str}")
+    # Databases (from DB — folder-scoped snippet data, grouped by database name)
+    databases = folder_context.get("databases", {})
+    # Fall back to legacy contacts/references keys if databases dict is empty
+    if not databases:
+        contacts = folder_context.get("contacts", [])
+        if contacts:
+            databases["contacts"] = contacts
+        refs = folder_context.get("references", [])
+        if refs:
+            databases["references"] = refs
+        # Handle legacy TOML format for references param
+        if references and not databases.get("references"):
+            if isinstance(references, list):
+                databases["references"] = references
+            elif isinstance(references, dict):
+                flat = []
+                for entity, kvs in references.items():
+                    for k, v in kvs.items():
+                        flat.append({"entity": entity, "key": k, "value": str(v)})
+                if flat:
+                    databases["references"] = flat
+
+    _HEADING_MAP = {"contacts": "Key Contacts", "references": "References"}
+    for db_name, records in sorted(databases.items()):
+        if not records:
+            continue
+        heading = _HEADING_MAP.get(db_name, db_name.replace("-", " ").replace("_", " ").title())
+        parts.append(f"\n## {heading}")
+        by_entity_db: dict[str, list[dict]] = {}
+        for r in records:
+            by_entity_db.setdefault(r["entity"], []).append(r)
+        for entity, fields in sorted(by_entity_db.items()):
+            items_str = ", ".join(f"{f['key']}: {f['value']}" for f in fields)
+            parts.append(f"- **{entity}**: {items_str}")
 
     # Instructions
     parts.append("\n## Instructions")
