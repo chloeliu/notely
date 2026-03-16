@@ -312,7 +312,6 @@ def _pick_folder(
     return _prompt_folder_with_autocomplete(
         config,
         suggested_dirs=top_dirs,
-        default="1" if top_dirs else "",
     )
 
 
@@ -1066,52 +1065,26 @@ def ask_routing_manually(
 
     ranked = sorted(range(len(all_folder_items)), key=_relevance, reverse=True)
 
-    # Show top 3
+    # Show top 3 as suggestions, then autocomplete prompt
     MAX_OPTIONS = 3
     top_indices = ranked[:MAX_OPTIONS]
-    folder_items = [all_folder_items[i] for i in top_indices]
-    folder_data = [all_folder_data[i] for i in top_indices]
+
+    # Build suggested_dirs list for the autocomplete prompt
+    suggested = []
+    for i in top_indices:
+        s, slug, sub = all_folder_data[i]
+        display = all_folder_items[i][1]
+        d = {"space": s, "group_slug": slug, "display_name": display}
+        if sub:
+            d["subgroup_slug"] = sub
+        suggested.append(d)
 
     console.print("\n[bold]Which folder?[/bold]")
-    choice = pick_from_list(
-        folder_items,
-        extras=[("e", "Somewhere else"), ("s", "Skip")],
-        allow_text=True,
-        console=console,
-    )
+    for i, d in enumerate(suggested, 1):
+        console.print(f"  [{i}] {d['display_name']}")
+    console.print(r"  \[s] Skip")
 
-    if choice is None or choice == "s":
-        return None
-
-    if choice == "e":
-        return _prompt_folder_with_autocomplete(config)
-
-    # Check if it's a numbered pick
-    try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(folder_data):
-            s, slug, sub = folder_data[idx]
-            display = folder_items[idx][1]
-            if sub:
-                group_display = slug
-                for d in all_dirs:
-                    if d["space"] == s and d["group_slug"] == slug and not d.get("subgroup_slug"):
-                        group_display = d["display_name"]
-                        break
-                return RoutingDecision(
-                    space=s, group_slug=slug, group_display=group_display,
-                    group_is_new=False,
-                    subgroup_slug=sub, subgroup_display=display,
-                )
-            return RoutingDecision(
-                space=s, group_slug=slug, group_display=display,
-                group_is_new=False,
-            )
-    except ValueError:
-        pass
-
-    # Free text typed — resolve it
-    return _resolve_folder_text(config, choice, all_dirs=all_dirs)
+    return _prompt_folder_with_autocomplete(config, suggested_dirs=suggested)
 
 
 def _routing_from_hints(
