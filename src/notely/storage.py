@@ -2177,6 +2177,7 @@ def universal_add(
     parsed = parse_record_with_ai(
         raw_input, db_name, all_fields,
         db_description=db_description,
+        user_name=config.user_name or "",
     )
 
     if not parsed:
@@ -2249,6 +2250,7 @@ def universal_add(
         revised = parse_record_with_ai(
             f"{raw_input}\n\nRevision: {instruction}",
             db_name, all_fields, db_description=db_description,
+            user_name=config.user_name or "",
         )
         if revised:
             parsed.clear()

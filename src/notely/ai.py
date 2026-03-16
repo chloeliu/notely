@@ -1821,6 +1821,7 @@ def parse_record_with_ai(
     fields: list[str],
     db_description: str = "",
     today: str | None = None,
+    user_name: str = "",
 ) -> dict[str, str]:
     """Use Haiku to parse free-form text into structured fields.
 
@@ -1841,6 +1842,10 @@ def parse_record_with_ai(
             f'"march 20" → "{today[:5]}03-20".'
         )
 
+    user_rule = ""
+    if user_name:
+        user_rule = f'\n- The current user is "{user_name}". "me"/"my"/"assign to me" = "{user_name}".'
+
     system = (
         f"Parse the user's text into structured fields for a '{db_name}' record.\n"
         f"{('Description: ' + db_description + chr(10)) if db_description else ''}"
@@ -1848,7 +1853,7 @@ def parse_record_with_ai(
         f"Rules:\n"
         f"- Extract values from the input. Omit fields not mentioned.\n"
         f"- If the user wrote field=value explicitly, use those exact values."
-        f"{date_rule}\n"
+        f"{date_rule}{user_rule}\n"
         f"- Keep values concise. Do not invent information."
     )
 
