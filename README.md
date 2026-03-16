@@ -185,7 +185,7 @@ flowchart TD
     D --> E{"AI classifies<br/>and structures"}
     E -->|"Structured content"| F["Full note<br/>(title, summary, tags,<br/>action items + records)"]
     E -->|"Quick task or idea"| G["Todo or Idea<br/>(one-liner, due date)"]
-    E -->|"Reference data"| H["Database record<br/>(contact, NPI, account)"]
+    E -->|"Snippet"| H["Database record<br/>(contact, NPI, account)"]
     C --> I["Saved as Markdown"]
     F --> I
     G --> J["Saved to database"]
