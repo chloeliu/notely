@@ -260,40 +260,30 @@ Both paths produce the same markdown files and search index.
 
 | Command | What it does |
 |---------|-------------|
-| `notely open` | Interactive session — paste notes, drag files, slash commands |
-| `notely dump` | One-shot: pipe text in, AI structures, save |
-| `notely search <query>` | Full-text + semantic search across all notes |
-| `notely todo` | View and manage action items |
-| `notely ideas` | View and manage ideas pipeline |
-| `notely list` | List recent notes |
-| `notely show <id>` | Display a full note |
-| `notely edit <id>` | Open in your editor, re-indexes on save |
-| `notely spaces` | Show workspace overview (spaces, groups, note counts) |
-| `notely query` | JSON query API for agents and scripts |
 | `notely init` | Set up a new workspace |
+| `notely open` | Interactive session — paste notes, slash commands, everything below |
+| `notely dump` | One-shot: pipe text in, AI structures, save |
 | `notely reindex` | Rebuild search index from markdown files |
+
+Also available as standalone commands: `notely search`, `notely todo`, `notely edit`, `notely query`.
 
 ### Inside `notely open`
 
 | Command | What it does |
 |---------|-------------|
-| `/todo [folder]` | Interactive todo mode — add, edit, done, batch edit (`edit 1 2 3 due=tomorrow`) |
-| `/search <folder\|query>` | Interactive search mode — hybrid FTS + semantic, keyword-highlighted snippets |
-| `/chat <folder>` | AI chat scoped to a folder's notes |
-| `/<db_name>` | Database interactive mode — AI-parsed add, update, delete, browse records |
-| `/clip <url>` | Save a web page as a note |
-| `/timer <folder> <desc>` | Time tracking — start, stop, retroactive logging |
+| `/todo [folder]` | Todo mode — add, edit, done, batch edit (`edit 1 2 3 due=tomorrow`) |
+| `/search <folder\|query>` | Search mode — hybrid FTS + semantic, keyword-highlighted snippets |
+| `/chat <folder>` | Chat mode — AI Q&A scoped to a folder's notes |
+| `/<db_name>` | Database mode — add, update, delete, browse records (`/contacts`, `/providers`, etc.) |
+| `/clip <url>` | Save a web page as a structured note |
 | `/folder <name>` | Set a working folder for the session |
 | `/edit <id>` | Edit a note in your editor |
-| `/delete <id>` | Delete a note (with confirmation) |
-| `/list [folder]` | List recent notes |
-| `/secret` | View stored secrets (`/secret service key` to reveal a value) |
+| `/delete <id>` | Delete a note |
+| `/timer` | Time tracking — start, stop, retroactive logging |
+| `/secret` | View stored secrets |
 | `/agent [folder]` | Conversational AI agent with external service access |
-| `/workflow` | Create, list, and run automated YAML workflows |
-| `/inbox` | Review items deposited by workflows |
 | `/sync` | Re-sync all files to database |
-| `/mkdir <path>` | Create a new folder |
-| `/rmdir <path>` | Remove an empty folder |
+| `/mkdir`, `/rmdir` | Manage folders |
 
 ## Key Features
 
