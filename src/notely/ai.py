@@ -233,7 +233,7 @@ ADD_SNIPPET_TOOL = {
                     "properties": {
                         "entity": {
                             "type": "string",
-                            "description": "Entity name: 'labcorp', 'plaid-api', 'dr-smith'",
+                            "description": "Entity name using real names: 'LabCorp', 'Dr. Smith', 'Tim Rodriguez'. For people use their actual name. For companies use their real name.",
                         },
                         "key": {
                             "type": "string",
@@ -382,7 +382,7 @@ STRUCTURE_NOTE_TOOL = {
                     "properties": {
                         "entity": {
                             "type": "string",
-                            "description": "Entity name or task text for todos",
+                            "description": "Entity name (use real names: 'Tim Rodriguez', 'Dr. Smith', 'LabCorp') or task text for todos",
                         },
                         "key": {"type": "string", "description": "Field name. Not needed for todos."},
                         "value": {"type": "string", "description": "The data value. Not needed for todos."},
@@ -547,7 +547,7 @@ EXTRACT_RECORDS_TOOL = {
                     "properties": {
                         "entity": {
                             "type": "string",
-                            "description": "Entity name or task text for todos",
+                            "description": "Entity name (use real names: 'Tim Rodriguez', 'Dr. Smith', 'LabCorp') or task text for todos",
                         },
                         "key": {"type": "string", "description": "Field name. Not needed for todos."},
                         "value": {"type": "string", "description": "The data value. Not needed for todos."},
@@ -640,7 +640,7 @@ STRUCTURE_ONLY_TOOL = {
                     "properties": {
                         "entity": {
                             "type": "string",
-                            "description": "Entity name or task text for todos",
+                            "description": "Entity name (use real names: 'Tim Rodriguez', 'Dr. Smith', 'LabCorp') or task text for todos",
                         },
                         "key": {
                             "type": "string",
@@ -719,7 +719,7 @@ MERGE_NOTE_TOOL = {
                     "properties": {
                         "entity": {
                             "type": "string",
-                            "description": "Entity name or task text for todos",
+                            "description": "Entity name (use real names: 'Tim Rodriguez', 'Dr. Smith', 'LabCorp') or task text for todos",
                         },
                         "key": {
                             "type": "string",
