@@ -295,40 +295,25 @@ def _pick_folder(
     config: NotelyConfig,
     dirs: list[dict[str, Any]],
 ) -> RoutingDecision | None:
-    """Show folder choices if available, otherwise folder autocomplete.
+    """Show suggested folders and prompt with tab completion across ALL folders.
 
-    Folders are shown as numbered picks with autocomplete fallback.
-    Typing a new name at the autocomplete prompt creates the folder.
+    Suggested folders (from vector search) are shown as numbered shortcuts.
+    The prompt itself has full autocomplete so the user can type any folder
+    name and tab-complete — no secondary prompt needed.
     """
-    if dirs:
-        top_dirs = [d for d in dirs[:5] if d.get("group_slug")]
-        if top_dirs:
-            items = [
-                (str(i), d["display_name"])
-                for i, d in enumerate(top_dirs, 1)
-            ]
-            extras = [("s", "Skip")]
+    top_dirs = [d for d in dirs[:5] if d.get("group_slug")] if dirs else []
 
-            choice = pick_from_list(
-                items, extras=extras, default="1",
-                allow_text=True, console=console,
-            )
+    # Show suggestions above the prompt
+    if top_dirs:
+        for i, d in enumerate(top_dirs, 1):
+            console.print(f"  [{i}] {d['display_name']}")
+        console.print(r"  \[s] Skip")
 
-            if choice is None or choice == "s":
-                return None
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(top_dirs):
-                    return _routing_from_dir(top_dirs[idx])
-            except ValueError:
-                # User typed a folder path — try matching existing folders first
-                resolved = _resolve_folder_text(config, choice, ask_space=False, create_new=False)
-                if resolved:
-                    return resolved
-                # No match — fall through to autocomplete where user can
-                # browse all folders or create a new one
-                return _prompt_folder_with_autocomplete(config, prefill=choice)
-    return _prompt_folder_with_autocomplete(config)
+    return _prompt_folder_with_autocomplete(
+        config,
+        suggested_dirs=top_dirs,
+        default="1" if top_dirs else "",
+    )
 
 
 def present_matches(
@@ -852,10 +837,20 @@ def _resolve_folder_text(
 def _prompt_folder_with_autocomplete(
     config: NotelyConfig,
     prefill: str = "",
+    suggested_dirs: list[dict[str, Any]] | None = None,
+    default: str = "",
 ) -> RoutingDecision | None:
-    """Single prompt with tab autocomplete across all folders. Handles new folders too."""
+    """Single prompt with tab autocomplete across all folders.
+
+    Args:
+        suggested_dirs: Numbered shortcut folders shown above the prompt.
+            "1".."N" picks from this list, "s" skips.
+        default: Default value if user presses Enter.
+    """
     from prompt_toolkit import prompt as pt_prompt
     from prompt_toolkit.completion import Completer, Completion
+
+    suggested_dirs = suggested_dirs or []
 
     # Load all directories — DB first, filesystem fallback for empty directories table
     try:
@@ -960,12 +955,36 @@ def _prompt_folder_with_autocomplete(
                             display_meta=display,
                         )
 
-    console.print(
-        "[dim]Type a folder path (tab to complete) or a new name to create.[/dim]"
-    )
+    hint = "[dim]Tab to browse folders, type a name to create new, s to skip[/dim]"
+    if not suggested_dirs:
+        hint = "[dim]Tab to browse folders, type a name to create new[/dim]"
+    console.print(hint)
     try:
-        result = pt_prompt("Folder: ", completer=_FolderCompleter(), default=prefill)
+        result = pt_prompt(
+            "Folder: ",
+            completer=_FolderCompleter(),
+            default=prefill or default,
+        )
     except (KeyboardInterrupt, EOFError):
+        return None
+
+    result = result.strip()
+
+    # Handle skip
+    if result.lower() == "s" and suggested_dirs:
+        return None
+
+    # Handle numbered shortcut for suggested folders
+    if suggested_dirs:
+        try:
+            idx = int(result) - 1
+            if 0 <= idx < len(suggested_dirs):
+                return _routing_from_dir(suggested_dirs[idx])
+        except ValueError:
+            pass
+
+    if not result:
+        # Enter with no default → skip
         return None
 
     return _resolve_folder_text(config, result, all_dirs=all_dirs)
