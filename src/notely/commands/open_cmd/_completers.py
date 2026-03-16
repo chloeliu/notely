@@ -867,6 +867,8 @@ class _TodoCommandCompleter(Completer):
         ("assign", "Change owner"),
         ("move", "Move to another folder"),
         ("plan", "Pick today's focus"),
+        ("show", "Filter by field=value"),
+        ("filter", "Filter by field=value"),
         ("all", "Show everyone's todos"),
         ("refresh", "Reload list"),
         ("q", "Exit todo mode"),
@@ -930,6 +932,21 @@ class _TodoCommandCompleter(Completer):
                 # Past folder word — show field completions
                 yield from self._yield_field_completions(parts[2] if len(parts) > 2 else "")
                 return
+        elif text_lower.startswith(("show ", "filter ")):
+            # After show/filter → suggest field= completions
+            after = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+            partial = after.strip().lower()
+            if "=" not in partial:
+                _FILTER_FIELDS = ["owner", "due", "folder", "task"]
+                for f in _FILTER_FIELDS:
+                    suggestion = f"{f}="
+                    if not partial or f.startswith(partial):
+                        yield Completion(
+                            suggestion,
+                            start_position=-len(after),
+                            display_meta=f"filter by {f}",
+                        )
+            return
         elif text_lower.startswith("move ") and self._folders:
             parts = text.split(None, 3)  # ['move', num, partial_folder?, ...]
             if len(parts) == 3:

@@ -130,7 +130,7 @@ def _todo_mode(
         label = "open" if show_all else "open for you"
         console.print(
             f"[dim]  {len(items_list)} {label} — "
-            "done · add · today · due · timer · assign · move · plan · all · q[/dim]"
+            "done · add · today · due · show · timer · assign · move · plan · all · q[/dim]"
         )
 
     # Initial display — try your todos first
@@ -252,6 +252,35 @@ def _todo_mode(
 
         elif cmd_lower == "refresh":
             _display(folder_filter=initial_folder)
+
+        elif cmd_lower.startswith(("show ", "filter ")) and "=" in cmd:
+            # Filter by field=value: show owner=jake, filter due=2026-03
+            arg = cmd.split(None, 1)[1]
+            fkey, _, fval = arg.partition("=")
+            fkey, fval = fkey.strip().lower(), fval.strip().lower()
+            if not fval:
+                console.print("[yellow]Usage: show field=value (e.g. show owner=jake)[/yellow]")
+            else:
+                filtered = []
+                for i in items:
+                    if fkey == "owner":
+                        if fval in (i.get("owner") or "").lower():
+                            filtered.append(i)
+                    elif fkey == "due":
+                        if fval in (i.get("due") or "").lower():
+                            filtered.append(i)
+                    elif fkey == "folder":
+                        fd = i.get("_folder_display", "")
+                        fk = _derive_folder_key(i)
+                        if fval in fd.lower() or fval in fk.lower():
+                            filtered.append(i)
+                    elif fkey == "task":
+                        if fval in (i.get("task") or "").lower():
+                            filtered.append(i)
+                if not filtered:
+                    console.print(f"[yellow]No todos matching {fkey}={fval}[/yellow]")
+                else:
+                    _render_grouped(filtered, show_all=True)
 
         elif cmd.isdigit():
             # Bare number — quick actions for that item

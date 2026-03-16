@@ -67,7 +67,8 @@ class _DatabaseCommandCompleter(Completer):
             ("add", "add a record"),
             ("delete", "delete a record"),
             ("edit", "edit a record value or entity name"),
-            ("show", "show entity details"),
+            ("show", "show entity or filter by key=value"),
+            ("filter", "filter by key=value"),
             ("search", "search records"),
             ("info", "show database settings"),
             ("describe", "set database description"),
@@ -93,9 +94,31 @@ class _DatabaseCommandCompleter(Completer):
             if first in ("show", "delete", "edit"):
                 rest = text.split(None, 1)[1] if len(words) > 1 else ""
                 partial = rest.strip().lower()
+                # For show/filter, suggest key= completions too
+                if first in ("show", "filter") and "=" not in partial:
+                    for k in self._get_keys():
+                        suggestion = f"{k}="
+                        if not partial or k.lower().startswith(partial):
+                            yield Completion(
+                                suggestion,
+                                start_position=-len(rest),
+                                display_meta=f"filter by {k}",
+                            )
                 for name in self._get_entities():
                     if not partial or partial in name.lower():
                         yield Completion(name, start_position=-len(rest))
+            elif first == "filter":
+                rest = text.split(None, 1)[1] if len(words) > 1 else ""
+                partial = rest.strip().lower()
+                if "=" not in partial:
+                    for k in self._get_keys():
+                        suggestion = f"{k}="
+                        if not partial or k.lower().startswith(partial):
+                            yield Completion(
+                                suggestion,
+                                start_position=-len(rest),
+                                display_meta=f"filter by {k}",
+                            )
             elif first == "add":
                 # After "add " — suggest key= fields for remaining unset fields
                 after_add = text.split(None, 1)[1] if len(words) > 1 else ""
@@ -574,12 +597,44 @@ def _database_mode(
                 completer.invalidate()
             continue
 
-        # show ENTITY
+        # show ENTITY or show key=value (filter)
         if cmd == "show":
             if len(parts) < 2:
-                console.print("[yellow]Usage: show ENTITY[/yellow]")
+                console.print("[yellow]Usage: show ENTITY or show key=value[/yellow]")
                 continue
-            _show_entity(" ".join(parts[1:]))
+            arg = " ".join(parts[1:])
+            if "=" in arg:
+                # Filter by field=value
+                fkey, _, fval = arg.partition("=")
+                fkey, fval = fkey.strip().lower(), fval.strip().lower()
+                filtered = [
+                    r for r in records
+                    if r.get("key", "").lower() == fkey and fval in r.get("value", "").lower()
+                ]
+                if not filtered:
+                    console.print(f"[yellow]No records matching {fkey}={fval}[/yellow]")
+                else:
+                    _display(recs=filtered, limit_entities=0)
+                continue
+            _show_entity(arg)
+            continue
+
+        # filter key=value
+        if cmd == "filter":
+            if len(parts) < 2 or "=" not in " ".join(parts[1:]):
+                console.print("[yellow]Usage: filter key=value[/yellow]")
+                continue
+            arg = " ".join(parts[1:])
+            fkey, _, fval = arg.partition("=")
+            fkey, fval = fkey.strip().lower(), fval.strip().lower()
+            filtered = [
+                r for r in records
+                if r.get("key", "").lower() == fkey and fval in r.get("value", "").lower()
+            ]
+            if not filtered:
+                console.print(f"[yellow]No records matching {fkey}={fval}[/yellow]")
+            else:
+                _display(recs=filtered, limit_entities=0)
             continue
 
         # search TEXT
@@ -615,4 +670,4 @@ def _database_mode(
                 _render_records(results)
             else:
                 console.print(f"[yellow]Unknown command or no results: {text}[/yellow]")
-                console.print("[dim]Commands: add, edit, delete, show, search, all, open, info, refresh, q[/dim]")
+                console.print("[dim]Commands: add, edit, delete, show, filter, search, all, open, info, refresh, q[/dim]")
