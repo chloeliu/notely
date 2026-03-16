@@ -822,7 +822,7 @@ def _build_databases_str(workspace_path: Path | str | None) -> str:
             lines.append(f"- {' — '.join(parts)}")
 
     if db_keys:
-        lines.append("\nReuse existing field names — don't create synonyms (use 'phone' not 'phone_number'). New fields are fine when genuinely different.")
+        lines.append("\nReuse existing field names — don't create synonyms (use 'phone' not 'phone_number'). Add new fields when the data calls for it (e.g. 'company', 'email'). Entity is the person/company name — don't duplicate it as a field.")
     return "\n".join(lines)
 
 

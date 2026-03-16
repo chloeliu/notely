@@ -202,61 +202,61 @@ def _todo_mode(
 
         elif cmd_lower == "done":
             _todo_done(config, items, today_ids, num_to_id, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("done "):
             _todo_done_direct(config, cmd[5:].strip(), num_to_id, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "add":
             _todo_add(config, default_folder=initial_folder)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("add "):
             _todo_add(config, inline_args=cmd[4:].strip(), default_folder=initial_folder)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "today":
             _todo_today(config, items, today_ids, num_to_id, today_str)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "due":
             _todo_show_due(items, num_to_id, config)
 
         elif cmd_lower == "timer":
             _todo_timer(config, items, today_ids, num_to_id)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("timer "):
             _todo_timer_direct(config, cmd[6:].strip(), num_to_id)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "plan":
             _todo_plan(config, items, num_to_id, today_str)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "all":
             _display(show_all=True)
 
         elif cmd_lower.startswith("assign "):
             _todo_assign_direct(config, cmd[7:].strip(), num_to_id, items, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("move "):
             _todo_move_direct(config, cmd[5:].strip(), num_to_id, items, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("delete "):
             _todo_delete(config, cmd[7:].strip(), num_to_id, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd_lower == "refresh":
-            _display()
+            _display(folder_filter=initial_folder)
 
         elif cmd.isdigit():
             # Bare number — quick actions for that item
             _todo_item_actions(config, cmd, items, today_ids, num_to_id, today_str, completer)
-            _display()
+            _display(folder_filter=initial_folder)
 
         else:
             # Try as folder filter
