@@ -34,10 +34,16 @@ attachments/
 agents/
 templates/
 _todos.csv
+_todo.csv
 _ideas.csv
 _references.csv
+_*.csv
 _timelog.csv
 config.toml
+
+# Raw recordings (clean versions in demos/)
+clip-*.cast
+clip-*.gif
 
 # Internal docs (not for public repo)
 CLAUDE.md

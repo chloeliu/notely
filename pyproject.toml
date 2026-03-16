@@ -47,7 +47,7 @@ Issues = "https://github.com/chloeliu/notely/issues"
 [project.optional-dependencies]
 pdf = ["pymupdf4llm>=0.0.10,<1", "pymupdf>=1.23,<2"]
 web = ["firecrawl-py>=1.0,<2"]
-dev = ["pytest>=8.0,<9", "pytest-cov>=5.0,<6"]
+dev = ["pytest>=8.0,<9", "pytest-cov>=5.0,<6", "ruff>=0.8,<1"]
 
 [project.scripts]
 notely = "notely.cli:cli"
@@ -56,6 +56,24 @@ notely-mcp = "notely.mcp_server:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line too long — handled by formatter if needed
+    "E402",   # module level import not at top — common in CLI tools
+    "E741",   # ambiguous variable name — false positives on short names
+    "F401",   # unused imports — some are re-exports
+    "F541",   # f-string without placeholders — intentional in some prompts
+    "F811",   # redefinition of unused name — from conditional imports
+    "F821",   # undefined name — false positives from `from __future__ import annotations`
+    "F823",   # undefined local — false positives from late binding
+    "F841",   # unused variable — some are for side-effect assignments
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
