@@ -340,6 +340,7 @@ def _show_summary(
 ) -> None:
     """Show what the AI set up, including the folder tree."""
     from pathlib import Path
+
     from slugify import slugify
 
     lines = ["[bold]Here's what we'll create:[/bold]", ""]

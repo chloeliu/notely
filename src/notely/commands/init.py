@@ -102,6 +102,7 @@ def _create_starter_folders(cfg: NotelyConfig, config_content: str, db_path: Pat
     Also registers each folder in the directories table and vector store.
     """
     import re
+
     from slugify import slugify
 
     pattern = re.compile(r"^#\s+\[([\w-]+)]\s+(.+)$")

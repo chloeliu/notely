@@ -478,6 +478,53 @@ class Database:
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    def search_with_snippets(
+        self,
+        text_query: str,
+        filters: SearchFilters | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """FTS search returning results with highlighted snippets.
+
+        Each result has an extra ``snippet`` field with matching excerpt.
+        Uses FTS5 ``snippet()`` on body_preview (col 4) and summary (col 1).
+        """
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        filter_sql, filter_params = self._build_filter_clauses(filters, prefix="n.")
+        where_clauses.extend(filter_sql)
+        params.extend(filter_params)
+
+        where = ""
+        if where_clauses:
+            where = "AND " + " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT n.*,
+                   snippet(notes_fts, 4, '>>>', '<<<', '...', 30) as snippet_body,
+                   snippet(notes_fts, 1, '>>>', '<<<', '...', 20) as snippet_summary,
+                   rank
+            FROM notes_fts f
+            JOIN notes n ON n.rowid = f.rowid
+            WHERE notes_fts MATCH ?
+            {where}
+            ORDER BY rank
+            LIMIT ?
+        """
+        params = [text_query] + params + [limit]
+        rows = self.conn.execute(query, params).fetchall()
+
+        results = []
+        for r in rows:
+            d = dict(r)
+            # Prefer body snippet, fall back to summary snippet
+            body_snip = d.pop("snippet_body", "") or ""
+            summary_snip = d.pop("snippet_summary", "") or ""
+            d["snippet"] = body_snip if ">>>" in body_snip else summary_snip
+            results.append(d)
+        return results
+
     def _filtered_search(
         self,
         filters: SearchFilters | None,
@@ -1956,7 +2003,7 @@ class Database:
 
     def cleanup_inbox(self, days: int = 30) -> int:
         """Delete filed/skipped inbox items older than N days. Returns count deleted."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         cursor = self.conn.execute(
             """DELETE FROM inbox

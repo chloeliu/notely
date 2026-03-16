@@ -270,6 +270,67 @@ def _routing_from_folder_default(
     )
 
 
+def _routing_from_note(note: dict[str, Any]) -> RoutingDecision:
+    """Build a RoutingDecision to merge into an existing note."""
+    return RoutingDecision(
+        space=note["space"],
+        group_slug=note["group_slug"],
+        group_display=note.get("group_slug", "").replace("-", " ").title(),
+        subgroup_slug=note.get("subgroup_slug"),
+        append_to_note=note["note_id"],
+    )
+
+
+def _routing_from_dir(d: dict[str, Any]) -> RoutingDecision:
+    """Build a RoutingDecision for a directory match."""
+    return RoutingDecision(
+        space=d["space"],
+        group_slug=d["group_slug"],
+        group_display=d["display_name"],
+        subgroup_slug=d.get("subgroup_slug"),
+    )
+
+
+def _pick_folder(
+    config: NotelyConfig,
+    dirs: list[dict[str, Any]],
+) -> RoutingDecision | None:
+    """Show folder choices if available, otherwise folder autocomplete.
+
+    Folders are shown as numbered picks with autocomplete fallback.
+    Typing a new name at the autocomplete prompt creates the folder.
+    """
+    if dirs:
+        top_dirs = [d for d in dirs[:5] if d.get("group_slug")]
+        if top_dirs:
+            items = [
+                (str(i), d["display_name"])
+                for i, d in enumerate(top_dirs, 1)
+            ]
+            extras = [("s", "Skip")]
+
+            choice = pick_from_list(
+                items, extras=extras, default="1",
+                allow_text=True, console=console,
+            )
+
+            if choice is None or choice == "s":
+                return None
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(top_dirs):
+                    return _routing_from_dir(top_dirs[idx])
+            except ValueError:
+                # User typed a folder path — try matching existing folders first
+                resolved = _resolve_folder_text(config, choice, ask_space=False, create_new=False)
+                if resolved:
+                    return resolved
+                # No match — fall through to autocomplete where user can
+                # browse all folders or create a new one
+                return _prompt_folder_with_autocomplete(config, prefill=choice)
+    return _prompt_folder_with_autocomplete(config)
+
+
 def present_matches(
     config: NotelyConfig,
     db: Database,
@@ -278,33 +339,28 @@ def present_matches(
     vec_store: Any = None,
     raw_text: str = "",
 ) -> RoutingDecision | None:
-    """Present search results with a smart decision flow.
+    """Present search results: note update and folder pick are separate steps.
 
     Decision tree:
-      1. Super close note (dist < 0.2) → "Already have 'X'. Update it?"
-      2. Close notes (dist < 0.4)      → "Update one of these? [notes] / No, new note"
-      3. Good dir match (dist < 0.4)   → "New note for [dir]? Y/n" + top 3 dirs
-      4. Weak matches                  → full list / manual
+      1. Close note (dist < 0.2) → "You already have 'X'. Update?" [u/n/s]
+      2. Close note (dist < 0.4) → "Update 'X'?" [u/n/s] (one at a time)
+      3. Pick folder → numbered folder list OR autocomplete prompt
+         Typing a new name creates the folder.
 
+    Notes and folders are never mixed in the same list.
     Returns None if user cancels.
     """
     # --- Gather close note matches ---
     close_notes: list[dict[str, Any]] = []
-    nearby_notes: list[dict[str, Any]] = []  # Between GOOD_MATCH and WEAK_MATCH
     seen_note_ids: set[str] = set()
     for nm in note_matches:
         if nm["note_id"] in seen_note_ids:
             continue
         seen_note_ids.add(nm["note_id"])
-        dist = nm.get("_distance", 1)
-        if dist < DIST_GOOD_MATCH:
+        if nm.get("_distance", 1) < DIST_GOOD_MATCH:
             close_notes.append(nm)
-        elif dist < DIST_WEAK_MATCH:
-            nearby_notes.append(nm)
 
     # --- Gather directory matches (skip space-level entries without group) ---
-    # Dedup on (space, group_slug) to prevent showing the same folder twice
-    # with different display names (e.g. "Groundhoglab" vs "Groundhog Lab").
     dirs: list[dict[str, Any]] = []
     seen_dir_keys: set[tuple[str, str]] = set()
     for dm in dir_matches:
@@ -316,163 +372,24 @@ def present_matches(
         seen_dir_keys.add(key)
         dirs.append(dm)
 
-    # ── Flow 1: Super close note match → likely duplicate ──
-    if close_notes and close_notes[0].get("_distance", 1) < DIST_DUPLICATE:
+    # ── Step 1: Note update check (notes and folders are separate) ──
+    if close_notes:
         best = close_notes[0]
-        dup_choice = duplicate_found(best["title"], best["date"], "similar", console=console)
+        # Very close match — likely duplicate
+        if best.get("_distance", 1) < DIST_DUPLICATE:
+            dup_choice = duplicate_found(best["title"], best["date"], "similar", console=console)
+        else:
+            # Close but not duplicate — ask about update
+            dup_choice = duplicate_found(best["title"], best["date"], "related", console=console)
+
         if dup_choice == "update":
-            return RoutingDecision(
-                space=best["space"],
-                group_slug=best["group_slug"],
-                group_display=best.get("group_slug", "").replace("-", " ").title(),
-                subgroup_slug=best.get("subgroup_slug"),
-                append_to_note=best["note_id"],
-            )
+            return _routing_from_note(best)
         if dup_choice == "skip":
             return None
-        # User chose "new" — continue to directory matching below
+        # User chose "new" — fall through to folder pick
 
-    # ── Flow 2: Close notes → offer update choices ──
-    if close_notes:
-        console.print("\n[bold]Update an existing note?[/bold]")
-        show_notes = close_notes[:3]
-        items = [
-            (str(i), f"[cyan]'{nm['title']}' ({nm['date']})[/cyan]")
-            for i, nm in enumerate(show_notes, 1)
-        ]
-        n = len(show_notes)
-        extras = [("n", "New note"), ("e", "Somewhere else"), ("s", "Skip")]
-
-        choice = pick_from_list(
-            items, extras=extras, default="n",
-            allow_text=True, console=console,
-        )
-
-        if choice is None or choice == "s":
-            return None
-        if choice == "e":
-            return _prompt_folder_with_autocomplete(config)
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < n:
-                picked = show_notes[idx]
-                return RoutingDecision(
-                    space=picked["space"],
-                    group_slug=picked["group_slug"],
-                    group_display=picked.get("group_slug", "").replace("-", " ").title(),
-                    subgroup_slug=picked.get("subgroup_slug"),
-                    append_to_note=picked["note_id"],
-                )
-        except ValueError:
-            # Free text — try to resolve as folder path
-            resolved = _resolve_folder_text(config, choice, ask_space=False)
-            if resolved:
-                return resolved
-            return _prompt_folder_with_autocomplete(config)
-        # User chose "new note" — fall through to directory selection
-
-    # ── Flow 3: Good directory match → compact top-3 confirm ──
-    if dirs and dirs[0].get("_distance", 1) < DIST_GOOD_MATCH:
-        top_dirs = dirs[:3]
-        console.print("\n[bold]New note — which folder?[/bold]")
-        items = [
-            (str(i), d["display_name"])
-            for i, d in enumerate(top_dirs, 1)
-        ]
-        extras = [("e", "Somewhere else"), ("s", "Skip")]
-
-        choice = pick_from_list(
-            items, extras=extras, default="1",
-            allow_text=True, console=console,
-        )
-
-        if choice is None or choice == "s":
-            return None
-        if choice == "e":
-            return _prompt_folder_with_autocomplete(config)
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(top_dirs):
-                picked_dir = top_dirs[idx]
-                if not picked_dir.get("group_slug"):
-                    return ask_routing_manually(config, hints={"space": picked_dir["space"]})
-                return RoutingDecision(
-                    space=picked_dir["space"],
-                    group_slug=picked_dir["group_slug"],
-                    group_display=picked_dir["display_name"],
-                    subgroup_slug=picked_dir.get("subgroup_slug"),
-                )
-        except ValueError:
-            resolved = _resolve_folder_text(config, choice, ask_space=False)
-            if resolved:
-                return resolved
-            return _prompt_folder_with_autocomplete(config)
-        return None
-
-    # ── Flow 4: Weak matches — dirs + nearby notes ──
-    if not dirs and not nearby_notes:
-        return _prompt_folder_with_autocomplete(config)
-
-    console.print("\n[bold]Where should this go?[/bold]")
-    idx_map: list[tuple[str, dict[str, Any]]] = []  # 0-indexed
-    items: list[tuple[str, str]] = []
-
-    # Show nearby notes first — user likely wants to merge
-    if nearby_notes:
-        console.print("[bold]Related notes:[/bold]")
-        for nm in nearby_notes[:3]:
-            items.append((str(len(items) + 1), f"[cyan]Update '{nm['title']}' ({nm['date']})[/cyan]"))
-            idx_map.append(("note", nm))
-
-    # Then directories
-    if dirs:
-        if nearby_notes:
-            console.print("[bold]Folders:[/bold]")
-        for d in dirs:
-            label = d["display_name"]
-            if d.get("note_count"):
-                label += f" ({d['note_count']} notes)"
-            items.append((str(len(items) + 1), label))
-            idx_map.append(("dir", d))
-
-    extras = [("n", "New location..."), ("s", "Cancel")]
-
-    choice = pick_from_list(
-        items, extras=extras, default="1",
-        allow_text=True, console=console,
-    )
-
-    if choice is None or choice == "s":
-        return None
-    if choice == "n":
-        return _prompt_folder_with_autocomplete(config)
-    try:
-        picked = int(choice) - 1
-        if 0 <= picked < len(idx_map):
-            kind, data = idx_map[picked]
-            if kind == "note":
-                return RoutingDecision(
-                    space=data["space"],
-                    group_slug=data["group_slug"],
-                    group_display=data.get("group_slug", "").replace("-", " ").title(),
-                    subgroup_slug=data.get("subgroup_slug"),
-                    append_to_note=data["note_id"],
-                )
-            # Directory pick
-            if not data.get("group_slug"):
-                return ask_routing_manually(config, hints={"space": data["space"]})
-            return RoutingDecision(
-                space=data["space"],
-                group_slug=data["group_slug"],
-                group_display=data["display_name"],
-                subgroup_slug=data.get("subgroup_slug"),
-            )
-    except ValueError:
-        resolved = _resolve_folder_text(config, choice, ask_space=False)
-        if resolved:
-            return resolved
-        return _prompt_folder_with_autocomplete(config)
-    return None
+    # ── Step 2: Pick folder (never mixed with notes) ──
+    return _pick_folder(config, dirs)
 
 
 class _Back:
@@ -782,11 +699,14 @@ def _resolve_folder_text(
     text: str,
     all_dirs: list[dict] | None = None,
     ask_space: bool = True,
+    create_new: bool = True,
 ) -> RoutingDecision | None:
     """Resolve free-text input to a RoutingDecision.
 
     Matches existing folders by full path, slug, or display name.
-    If no match, treats as new folder creation (space/name or bare name).
+    If no match and create_new=True, treats as new folder creation.
+    If no match and create_new=False, returns None (caller can fall through
+    to autocomplete prompt).
     When ask_space=False, uses first space for bare names instead of prompting.
     """
     from slugify import slugify
@@ -843,7 +763,11 @@ def _resolve_folder_text(
                 group_is_new=False,
             )
 
-    # No match — treat as new folder creation
+    # No match found
+    if not create_new:
+        return None
+
+    # Treat as new folder creation
     space_names = config.space_names()
     if "/" in text:
         parts = text.split("/", 1)
@@ -927,18 +851,37 @@ def _resolve_folder_text(
 
 def _prompt_folder_with_autocomplete(
     config: NotelyConfig,
+    prefill: str = "",
 ) -> RoutingDecision | None:
     """Single prompt with tab autocomplete across all folders. Handles new folders too."""
     from prompt_toolkit import prompt as pt_prompt
     from prompt_toolkit.completion import Completer, Completion
 
-    # Load all directories
+    # Load all directories — DB first, filesystem fallback for empty directories table
     try:
         with Database(config.db_path) as db:
             db.initialize()
             all_dirs = db.get_all_directories()
     except Exception:
         all_dirs = []
+
+    # Filesystem fallback: scan notes/ for folders not yet in DB
+    seen_paths = {f"{d['space']}/{d.get('group_slug', '')}" for d in all_dirs if d.get("group_slug")}
+    if config.notes_dir.exists():
+        for space_dir in sorted(config.notes_dir.iterdir()):
+            if not space_dir.is_dir() or space_dir.name.startswith("."):
+                continue
+            for group_dir in sorted(space_dir.iterdir()):
+                if not group_dir.is_dir() or group_dir.name.startswith("."):
+                    continue
+                fp = f"{space_dir.name}/{group_dir.name}"
+                if fp not in seen_paths:
+                    seen_paths.add(fp)
+                    all_dirs.append({
+                        "space": space_dir.name,
+                        "group_slug": group_dir.name,
+                        "display_name": group_dir.name.replace("-", " ").title(),
+                    })
 
     # Build completion list: full paths with display names
     # (full_path, display_name, space, group_slug, subgroup_slug)
@@ -1021,7 +964,7 @@ def _prompt_folder_with_autocomplete(
         "[dim]Type a folder path (tab to complete) or a new name to create.[/dim]"
     )
     try:
-        result = pt_prompt("Folder: ", completer=_FolderCompleter())
+        result = pt_prompt("Folder: ", completer=_FolderCompleter(), default=prefill)
     except (KeyboardInterrupt, EOFError):
         return None
 

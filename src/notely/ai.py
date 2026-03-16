@@ -11,7 +11,7 @@ from typing import Any
 
 import anthropic
 
-from .templates import load_template, CLASSIFIER, FORMATTER, MERGER
+from .templates import CLASSIFIER, FORMATTER, MERGER, load_template
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,9 @@ def describe_image(file_path: Path) -> str | None:
 from .config import NotelyConfig
 from .db import Database
 from .models import (
+    ActionItem,
     AIMetadata,
     AIStructuredOutput,
-    ActionItem,
     InputSize,
     NoteRouting,
     SpaceTaxonomy,
@@ -1765,3 +1765,112 @@ def chat_about_notes(
         return text, messages
 
     return "[Chat reached maximum tool-use depth]", messages
+
+
+# ---------------------------------------------------------------------------
+# Lightweight record parsing (Haiku) — universal add
+# ---------------------------------------------------------------------------
+
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+# Date-like field names — AI prompt tells Haiku to convert natural language
+_DATE_FIELD_NAMES = {"due", "date", "deadline", "start", "end"}
+
+
+def _build_parse_tool(
+    db_name: str,
+    fields: list[str],
+    db_description: str = "",
+) -> dict:
+    """Build a tool schema for Haiku to parse free-form input into fields."""
+    is_todo = db_name == "todo"
+    primary = "task" if is_todo else "entity"
+    primary_desc = "The task description" if is_todo else "The main entity/subject name"
+
+    properties: dict[str, Any] = {
+        primary: {"type": "string", "description": primary_desc},
+    }
+    for f in fields:
+        if f == primary:
+            continue
+        desc = f
+        if f.lower() in _DATE_FIELD_NAMES:
+            desc = f"{f} — date in YYYY-MM-DD"
+        properties[f] = {"type": "string", "description": desc}
+    # description is always available
+    if "description" not in properties:
+        properties["description"] = {
+            "type": "string",
+            "description": "Optional note about this record",
+        }
+
+    return {
+        "name": "parse_record",
+        "description": f"Parse text into fields for a '{db_name}' record",
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": [primary],
+        },
+    }
+
+
+def parse_record_with_ai(
+    raw_input: str,
+    db_name: str,
+    fields: list[str],
+    db_description: str = "",
+    today: str | None = None,
+) -> dict[str, str]:
+    """Use Haiku to parse free-form text into structured fields.
+
+    Returns a dict of field_name → value. Empty dict on failure.
+    """
+    if not raw_input.strip():
+        return {}
+
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    tool = _build_parse_tool(db_name, fields, db_description)
+
+    date_fields = [f for f in fields if f.lower() in _DATE_FIELD_NAMES]
+    date_rule = ""
+    if date_fields:
+        date_rule = (
+            f"\n- Date fields ({', '.join(date_fields)}): convert to YYYY-MM-DD. "
+            f'Today is {today}. "tomorrow" → next day, "friday" → next Friday, '
+            f'"march 20" → "{today[:5]}03-20".'
+        )
+
+    system = (
+        f"Parse the user's text into structured fields for a '{db_name}' record.\n"
+        f"{('Description: ' + db_description + chr(10)) if db_description else ''}"
+        f"Fields: {', '.join(fields)}\n\n"
+        f"Rules:\n"
+        f"- Extract values from the input. Omit fields not mentioned.\n"
+        f"- If the user wrote field=value explicitly, use those exact values."
+        f"{date_rule}\n"
+        f"- Keep values concise. Do not invent information."
+    )
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=256,
+            system=system,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "parse_record"},
+            messages=[{"role": "user", "content": raw_input}],
+        )
+    except Exception as e:
+        logger.debug("Haiku parse_record failed: %s", e)
+        return {}
+
+    # Extract tool result
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "parse_record":
+            result = block.input
+            # Filter out empty values
+            return {k: str(v) for k, v in result.items() if v}
+
+    return {}

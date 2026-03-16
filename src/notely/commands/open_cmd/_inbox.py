@@ -12,10 +12,9 @@ from ...config import NotelyConfig
 from ...db import Database
 from ...models import NoteRouting
 from ...prompts import confirm_action, confirm_destructive
-from ...storage import show_merge_preview, edit_merge_result, apply_merge, preview_and_save_records
-
-from ._shared import console
+from ...storage import apply_merge, edit_merge_result, preview_and_save_records, show_merge_preview
 from ._input import _handle_list_result, _handle_snippet_result
+from ._shared import console
 
 if TYPE_CHECKING:
     from ._completers import _SlashCompleter
@@ -29,11 +28,14 @@ def _handle_inbox(
 ) -> None:
     """View and process inbox items — review, file, skip, or pull from agents."""
     from ...db import safe_json_loads, safe_parse_tags
+    from ...models import ActionItem, InboxItem, InputSize, Note, Refinement
     from ...storage import (
-        generate_file_path, save_and_sync, edit_note_in_editor,
-        sync_todo_index, sync_ideas_index,
+        edit_note_in_editor,
+        generate_file_path,
+        save_and_sync,
+        sync_ideas_index,
+        sync_todo_index,
     )
-    from ...models import ActionItem, InboxItem, Note, Refinement, InputSize
 
     parts = arg.strip().split(None, 1) if arg.strip() else []
     subcmd = parts[0].lower() if parts else ""
@@ -242,8 +244,8 @@ def _handle_inbox(
 
             # Merge with existing note
             if routing.append_to_note:
-                from ...storage import read_note
                 from ...ai import merge_with_existing
+                from ...storage import read_note
                 existing_db_row = db.get_note(routing.append_to_note)
                 if not existing_db_row:
                     console.print("[yellow]Note not found, skipping.[/yellow]")
@@ -398,12 +400,16 @@ def _process_raw_inbox_item(
     Flow: pick folder → AI structures → preview → save.
     Routing before AI saves an API call if the user skips.
     """
-    from ...ai import structure_only, ListItemResult, SnippetResult
+    from ...ai import ListItemResult, SnippetResult, structure_only
+    from ...models import InputSize, Note, Refinement
     from ...storage import (
-        classify_input_size, generate_file_path, save_and_sync,
-        edit_note_in_editor, sync_todo_index, sync_ideas_index,
+        classify_input_size,
+        edit_note_in_editor,
+        generate_file_path,
+        save_and_sync,
+        sync_ideas_index,
+        sync_todo_index,
     )
-    from ...models import Note, Refinement, InputSize
 
     # Get raw data — prefer _raw from metadata, fall back to body
     raw_data = metadata.get("_raw")
@@ -443,8 +449,8 @@ def _process_raw_inbox_item(
 
     # Merge with existing note
     if routing.append_to_note:
-        from ...storage import read_note
         from ...ai import merge_with_existing
+        from ...storage import read_note
 
         existing_db_row = db.get_note(routing.append_to_note)
         if not existing_db_row:
@@ -625,11 +631,14 @@ def _save_raw_inbox_item(
     completer: "_SlashCompleter",
 ) -> None:
     """Save a raw inbox item as a note without AI structuring."""
+    from ...models import InputSize, Note, Refinement
     from ...storage import (
-        generate_file_path, save_and_sync, edit_note_in_editor,
-        sync_todo_index, sync_ideas_index,
+        edit_note_in_editor,
+        generate_file_path,
+        save_and_sync,
+        sync_ideas_index,
+        sync_todo_index,
     )
-    from ...models import Note, Refinement, InputSize
 
     # Route first
     search_text = row.get("title", "")

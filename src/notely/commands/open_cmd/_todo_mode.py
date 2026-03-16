@@ -8,13 +8,16 @@ from prompt_toolkit import PromptSession
 
 from ...config import NotelyConfig
 from ...db import Database, safe_json_loads
-
 from ._shared import console
 
 
-def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
+def _todo_mode(
+    config: NotelyConfig,
+    completer: "_SlashCompleter",
+    initial_folder: str | None = None,
+) -> None:
     """Interactive todo management mode. Called when user types /todo with no subcommand."""
-    from ._completers import _TodoItemCompleter, _SlashCompleter, _TodoCommandCompleter
+    from ._completers import _SlashCompleter, _TodoCommandCompleter, _TodoItemCompleter
 
     today_str = date.today().isoformat()
 
@@ -60,20 +63,22 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
         num_to_id.clear()
         return raw
 
-    def _display(show_all: bool = False, folder_filter: str | None = None) -> None:
+    def _display(
+        show_all: bool = False, folder_filter: str | None = None,
+        quiet: bool = False,
+    ) -> None:
         loaded = _load_items(show_all=show_all, folder_filter=folder_filter)
         if not loaded:
-            if folder_filter:
-                console.print(f"[dim]No open todos matching '{folder_filter}'.[/dim]")
-            elif show_all:
-                console.print("[dim]No open todos.[/dim]")
-            else:
-                console.print("[dim]No open todos for you.[/dim]")
+            if not quiet:
+                if show_all:
+                    console.print("[dim]No open todos.[/dim]")
+                else:
+                    console.print("[dim]No open todos for you.[/dim]")
             return
         _render_grouped(loaded, show_all=show_all)
 
     def _render_grouped(items_list: list[dict], show_all: bool = False) -> None:
-        from ...timer import get_running_timer_for_todo, elapsed_since
+        from ...timer import elapsed_since, get_running_timer_for_todo
 
         # Separate today items from rest
         today_items = [i for i in items_list if i["id"] in today_ids]
@@ -128,11 +133,35 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
             "done · add · today · due · timer · assign · move · plan · all · q[/dim]"
         )
 
-    # Initial display
-    _display()
+    # Initial display — try your todos first
+    if initial_folder:
+        # Check how many total todos exist in this folder
+        _load_items(show_all=True, folder_filter=initial_folder)
+        all_count = len(items)
+        # Now load just yours
+        _display(folder_filter=initial_folder, quiet=True)
+        user = config.user_name or "you"
+        if items:
+            # You have todos here — show them
+            if all_count > len(items):
+                console.print(f"[dim]  {all_count - len(items)} more assigned to others. 'all' to see.[/dim]")
+        elif all_count > 0:
+            # No personal todos but others exist
+            console.print(f"[dim]  No open todos for {user}. {all_count} assigned to others.[/dim]")
+        else:
+            console.print("[dim]  No open todos here. Try 'add' to create one.[/dim]")
+    else:
+        _display()
+        if not items:
+            console.print("[dim]  Try 'all' to see everyone's, or 'add' to create one.[/dim]")
 
-    if not items:
-        return
+    # Build prompt label
+    if initial_folder:
+        from ._shared import _fuzzy_match_folder
+        match = _fuzzy_match_folder(config, initial_folder)
+        prompt_label = f"notely-todo ({match[2]})" if match else f"notely-todo ({initial_folder})"
+    else:
+        prompt_label = "notely-todo"
 
     # Build completer for item selection
     todo_completer = _TodoItemCompleter(items, today_ids)
@@ -142,14 +171,16 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
 
     from ._shared import _get_all_folders
     folders = _get_all_folders(config)
-    cmd_completer = _TodoCommandCompleter(folders=folders)
+    cmd_completer = _TodoCommandCompleter(
+        folders=folders, has_default_folder=bool(initial_folder),
+    )
     session: PromptSession = PromptSession(
         completer=cmd_completer, complete_while_typing=True,
     )
 
     while True:
         try:
-            text = session.prompt("\nnotely-todo> ")
+            text = session.prompt(f"\n{prompt_label}> ")
         except EOFError:
             break
         except KeyboardInterrupt:
@@ -178,11 +209,11 @@ def _todo_mode(config: NotelyConfig, completer: "_SlashCompleter") -> None:
             _display()
 
         elif cmd_lower == "add":
-            _todo_add(config)
+            _todo_add(config, default_folder=initial_folder)
             _display()
 
         elif cmd_lower.startswith("add "):
-            _todo_add(config, inline_args=cmd[4:].strip())
+            _todo_add(config, inline_args=cmd[4:].strip(), default_folder=initial_folder)
             _display()
 
         elif cmd_lower == "today":
@@ -346,7 +377,7 @@ def _todo_done_direct(
 
 def _do_mark_done(config: NotelyConfig, item_id: int, completer: "_SlashCompleter") -> None:
     """Actually mark an item done."""
-    from ...storage import update_action_status, sync_todo_index
+    from ...storage import sync_todo_index, update_action_status
 
     with Database(config.db_path) as db:
         db.initialize()
@@ -371,6 +402,7 @@ def _todo_delete(
 ) -> None:
     """Delete todos by number. Supports 'delete 1 3 5', 'delete 1-5', mixed."""
     from rich.prompt import Prompt
+
     from ...storage import sync_todo_index
 
     # Parse numbers: support "1 3 5", "1-5", or mixed "1-3 5 7"
@@ -419,85 +451,67 @@ def _todo_delete(
     completer.invalidate_todos()
 
 
-def _todo_add(config: NotelyConfig, inline_args: str = "") -> None:
-    """Add a new todo. Supports inline: 'add FOLDER TASK' or stepped prompts."""
-    from prompt_toolkit import PromptSession
-    from ...dates import parse_due_date
-    from ._shared import _get_all_folders, _fuzzy_match_folder
+def _todo_add(
+    config: NotelyConfig,
+    inline_args: str = "",
+    default_folder: str | None = None,
+) -> None:
+    """Add a new todo via universal_add. Resolves folder first, then delegates.
 
-    space = None
-    group_name = None
-    folder_display = ""
-    task = ""
+    Supports: 'add FOLDER free-form text' or 'add free-form text' (uses default_folder).
+    """
+    from ._shared import _fuzzy_match_folder
+
+    space = ""
+    group_slug = ""
+    raw_input = inline_args
 
     if inline_args:
-        # Try first word as folder, rest as task
+        # Try first word as folder, rest as raw input
         parts = inline_args.split(None, 1)
         match = _fuzzy_match_folder(config, parts[0])
         if match:
             space = match[0]
-            group_name = match[1] or None
-            folder_display = match[2]
-            task = parts[1].strip() if len(parts) > 1 else ""
-        else:
-            # Not a folder — treat the whole thing as the task
-            task = inline_args
+            group_slug = match[1] or ""
+            raw_input = parts[1].strip() if len(parts) > 1 else ""
+        # else: whole string is task input — folder resolved below
 
-    if not task:
-        try:
-            task = PromptSession().prompt("  Task: ")
-        except (EOFError, KeyboardInterrupt):
-            return
-        task = task.strip()
-        if not task:
-            return
+    # Fall back to scoped folder
+    if not space and default_folder:
+        match = _fuzzy_match_folder(config, default_folder)
+        if match:
+            space = match[0]
+            group_slug = match[1] or ""
 
+    # Prompt for folder if still unresolved
     if not space:
-        # Folder (optional, with hierarchical drill-down)
+        from prompt_toolkit import PromptSession
+
         from ._completers import _FolderPathCompleter
+        from ._shared import _get_all_folders
         folders = _get_all_folders(config)
-        folder_completer = _FolderPathCompleter(folders)
         try:
-            folder_input = PromptSession(completer=folder_completer).prompt(
-                "  Folder: ", default=""
-            )
+            folder_input = PromptSession(
+                completer=_FolderPathCompleter(folders),
+            ).prompt("  Folder: ", default="")
         except (EOFError, KeyboardInterrupt):
             folder_input = ""
-        folder_input = folder_input.strip()
-
-        if folder_input:
-            match = _fuzzy_match_folder(config, folder_input)
+        if folder_input.strip():
+            match = _fuzzy_match_folder(config, folder_input.strip())
             if match:
                 space = match[0]
-                group_name = match[1] or None
-                folder_display = match[2]
+                group_slug = match[1] or ""
 
-    # Due date (optional)
-    try:
-        due_input = PromptSession().prompt("  Due: ", default="")
-    except (EOFError, KeyboardInterrupt):
-        due_input = ""
-    due = parse_due_date(due_input) if due_input.strip() else None
-
-    # Create
+    # Delegate to universal_add
+    from ...storage import universal_add
     with Database(config.db_path) as db:
         db.initialize()
-        from ...storage import sync_todo_index
-        item_id = db.add_todo(
-            owner=config.user_name or "",
-            task=task,
-            due=due,
-            space=space,
-            group_slug=group_name,
+        universal_add(
+            config, db, "todo",
+            raw_input=raw_input,
+            space=space, group_slug=group_slug,
+            default_owner=config.user_name or "",
         )
-        sync_todo_index(config, db)
-
-    parts = [f"[green]Added:[/green] {task}"]
-    if folder_display:
-        parts.append(f"({folder_display})")
-    if due:
-        parts.append(f"due {due}")
-    console.print(" ".join(parts))
 
 
 def _todo_today(
@@ -552,7 +566,7 @@ def _todo_show_due(
     items: list[dict], num_to_id: dict[int, int], config: NotelyConfig
 ) -> None:
     """Display items sorted by due date."""
-    from ...timer import get_running_timer_for_todo, elapsed_since
+    from ...timer import elapsed_since, get_running_timer_for_todo
 
     if not items:
         console.print("[dim]No open todos.[/dim]")
@@ -656,7 +670,7 @@ def _start_timer_for_item(
     config: NotelyConfig, item_id: int, items: list[dict]
 ) -> None:
     """Start a timer linked to a todo item."""
-    from ...timer import start_timer, get_running_timer_for_todo
+    from ...timer import get_running_timer_for_todo, start_timer
 
     # Check if already running
     running = get_running_timer_for_todo(config, item_id)
@@ -766,7 +780,7 @@ def _todo_item_actions(
     if meta:
         console.print(f"  [dim]{' · '.join(meta)}[/dim]")
 
-    from ...timer import get_running_timer_for_todo, elapsed_since
+    from ...timer import elapsed_since, get_running_timer_for_todo
     running = get_running_timer_for_todo(config, item_id)
     if running:
         console.print(f"  [green]⏱ Timer running: {elapsed_since(running['start'])}[/green]")
@@ -814,7 +828,7 @@ def _todo_item_actions(
     elif choice == "i" and not running:
         _start_timer_for_item(config, item_id, items)
     elif choice == "s" and running:
-        from ...timer import stop_timer, format_duration
+        from ...timer import format_duration, stop_timer
         stopped = stop_timer(config, running["id"])
         if stopped:
             mins = int(stopped.get("duration_minutes", 0))
@@ -843,7 +857,7 @@ def _todo_assign_direct(
     item = next((i for i in items if i["id"] == item_id), None)
     task = item["task"] if item else f"#{item_id}"
 
-    from ...storage import update_action_owner, sync_todo_index
+    from ...storage import sync_todo_index, update_action_owner
     with Database(config.db_path) as db:
         db.initialize()
         update_action_owner(config, db, item_id, new_owner)
@@ -861,8 +875,8 @@ def _todo_move_direct(
     completer: "_SlashCompleter",
 ) -> None:
     """Inline move: 'move 1 clients/sanity'."""
-    from ._shared import _fuzzy_match_folder
     from ...storage import sync_todo_index
+    from ._shared import _fuzzy_match_folder
 
     parts = text.split(None, 1)
     if len(parts) < 2:
@@ -903,7 +917,7 @@ def _do_assign(
     config: NotelyConfig, item_id: int, task: str, completer: "_SlashCompleter"
 ) -> None:
     """Assign a todo to another owner."""
-    from ...storage import update_action_owner, sync_todo_index
+    from ...storage import sync_todo_index, update_action_owner
 
     try:
         new_owner = PromptSession().prompt("  Assign to: ")
@@ -925,6 +939,8 @@ def _do_assign(
 
 # Avoid circular import — used only for type hints
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
-    from ._completers import _SlashCompleter
     from prompt_toolkit import PromptSession
+
+    from ._completers import _SlashCompleter

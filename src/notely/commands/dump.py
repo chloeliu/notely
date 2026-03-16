@@ -16,13 +16,16 @@ from ..db import Database
 from ..models import InputSize, Note, Refinement
 from ..prompts import confirm_action, no_changes_retry
 from ..storage import (
-    generate_file_path, write_note, sync_todo_index, sync_ideas_index,
+    apply_merge,
     classify_input_size,
+    edit_merge_result,
+    generate_file_path,
+    preview_and_save_records,
     save_and_sync,
     show_merge_preview,
-    edit_merge_result,
-    apply_merge,
-    preview_and_save_records,
+    sync_ideas_index,
+    sync_todo_index,
+    write_note,
 )
 
 console = Console()
@@ -36,7 +39,8 @@ def _read_input(file_path: str | None) -> tuple[str, "Path | None"]:
     """
     if file_path:
         from pathlib import Path
-        from ..files import extract_text, PDF_EXTENSIONS, IMAGE_EXTENSIONS
+
+        from ..files import IMAGE_EXTENSIONS, PDF_EXTENSIONS, extract_text
         p = Path(file_path)
         if p.suffix.lower() in (PDF_EXTENSIONS | IMAGE_EXTENSIONS):
             text, file_type = extract_text(p)
@@ -256,11 +260,16 @@ def _create_ai_note(
 ) -> None:
     """Create a note or list item with AI structuring + vector routing."""
     from ..ai import (
-        structure_only, merge_with_existing, mask_secrets, unmask_secrets,
-        ListItemResult, SnippetResult, RecordsOnlyResult,
+        ListItemResult,
+        RecordsOnlyResult,
+        SnippetResult,
+        mask_secrets,
+        merge_with_existing,
+        structure_only,
+        unmask_secrets,
     )
     from ..models import AIStructuredOutput, NoteRouting
-    from ..routing import route_input, ensure_directory_indexed
+    from ..routing import ensure_directory_indexed, route_input
     from ..vectors import get_vector_store, try_vector_sync_note
 
     with Database(config.db_path) as db:
@@ -311,7 +320,8 @@ def _create_ai_note(
 
         # Handle append
         if routing.append_to_note:
-            from ..storage import read_note, write_note as do_write
+            from ..storage import read_note
+            from ..storage import write_note as do_write
             existing_db = db.get_note(routing.append_to_note)
             if existing_db:
                 existing = read_note(config, existing_db["file_path"])

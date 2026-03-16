@@ -11,12 +11,11 @@ from rich.prompt import Prompt
 
 from ...config import NotelyConfig
 from ...db import Database
-
 from ._shared import console
 
 if TYPE_CHECKING:
-    from prompt_toolkit.document import Document
     from prompt_toolkit.complete_event import CompleteEvent
+    from prompt_toolkit.document import Document
 
 
 class _DatabaseCommandCompleter(Completer):
@@ -98,33 +97,30 @@ class _DatabaseCommandCompleter(Completer):
                     if not partial or partial in name.lower():
                         yield Completion(name, start_position=-len(rest))
             elif first == "add":
-                if len(words) == 1:
-                    # After "add " — suggest entity names
-                    for name in self._get_entities():
-                        yield Completion(name, start_position=0)
-                elif len(words) == 2:
-                    # After "add ENTITY " — suggest known keys
-                    partial = words[1].lower() if len(words) > 1 else ""
-                    # Check if we're still typing the entity or moved to key
-                    after_add = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
-                    if " " in after_add:
-                        # We have entity + partial key
-                        key_part = after_add.split(None, 1)
-                        key_partial = key_part[1].lower() if len(key_part) > 1 else ""
-                        for k in self._get_keys():
-                            if not key_partial or k.lower().startswith(key_partial):
-                                yield Completion(k, start_position=-len(key_partial))
-                    else:
-                        # Still typing entity name
-                        for name in self._get_entities():
-                            if not partial or partial in name.lower():
-                                yield Completion(name, start_position=-len(partial))
-                elif len(words) == 3:
-                    # After "add ENTITY key_partial" — suggest known keys
-                    key_partial = words[2].lower()
+                # After "add " — suggest key= fields for remaining unset fields
+                after_add = text.split(None, 1)[1] if len(words) > 1 else ""
+                # Find already-set key= fields
+                set_fields: set[str] = set()
+                for token in after_add.split():
+                    if "=" in token:
+                        set_fields.add(token.split("=", 1)[0].lower())
+                # Current partial word
+                if after_add.endswith(" ") or not after_add:
+                    partial = ""
+                else:
+                    partial = after_add.rsplit(None, 1)[-1]
+                # Don't suggest when typing a value (after =)
+                if "=" not in partial:
+                    partial_lower = partial.lower()
                     for k in self._get_keys():
-                        if k.lower().startswith(key_partial):
-                            yield Completion(k, start_position=-len(words[2]))
+                        if k.lower() not in set_fields:
+                            suggestion = f"{k}="
+                            if not partial or k.lower().startswith(partial_lower):
+                                yield Completion(
+                                    suggestion,
+                                    start_position=-len(partial),
+                                    display_meta=f"set {k}",
+                                )
 
 
 def _database_mode(
@@ -399,13 +395,9 @@ def _database_mode(
         parts = text.split(None, 2)
         cmd = parts[0].lower()
 
-        # add ENTITY key value
+        # add — free-form input, AI-parsed
         if cmd == "add":
-            add_parts = text.split(None, 3)
-            if len(add_parts) < 4:
-                console.print("[yellow]Usage: add ENTITY key value[/yellow]")
-                continue
-            entity, key, value = add_parts[1], add_parts[2], add_parts[3]
+            raw_input = text[4:].strip() if len(text) > 4 else ""
             with Database(config.db_path) as db:
                 db.initialize()
                 # Confirm new database creation on first record
@@ -414,27 +406,12 @@ def _database_mode(
                     if not _confirm_new_database(config, db_name):
                         console.print("[dim]Cancelled.[/dim]")
                         continue
-                # Check for similar entity names
-                similar = db.find_similar_entities(entity, db_name)
-                if similar:
-                    console.print(f"[yellow]Similar entities exist: {', '.join(similar[:3])}[/yellow]")
-                    try:
-                        choice = Prompt.ask(
-                            f"[dim]Use existing name, or keep '{entity}'?[/dim]",
-                            choices=[*[str(i+1) for i in range(min(3, len(similar)))], "k"],
-                            default="k",
-                        )
-                        if choice != "k":
-                            entity = similar[int(choice) - 1]
-                    except (KeyboardInterrupt, EOFError, ValueError):
-                        pass
-                ref_id = db.add_reference(
-                    entity=entity, key=key, value=value,
-                    snippet_type=db_name,
+                from ...storage import universal_add
+                universal_add(
+                    config, db, db_name,
+                    raw_input=raw_input,
                     space=wf_space, group_slug=wf_group,
                 )
-                sync_database_indexes(config, db)
-            console.print(f"[green]Saved:[/green] {entity}.{key} = {value} (#{ref_id})")
             _load(show_all=not wf_space)
             completer.invalidate()
             continue

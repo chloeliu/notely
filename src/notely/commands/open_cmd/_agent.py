@@ -9,9 +9,8 @@ from rich.prompt import Prompt
 
 from ...config import NotelyConfig
 from ...db import Database
-
-from ._shared import console, _get_all_folders, _fuzzy_match_folder, _working_folder_query
 from ._completers import _ConnectFolderCompleter, _make_agent_note_completer
+from ._shared import _fuzzy_match_folder, _get_all_folders, _working_folder_query, console
 
 
 def _agent_dispatch(config: NotelyConfig, arg: str, working_folder: dict | None = None) -> None:
@@ -716,7 +715,7 @@ def _make_chat_tool_handler(
 
 def _chat_mode(config: NotelyConfig, query: str) -> None:
     """Enter chat mode for a specific folder."""
-    from ...ai import chat_about_notes, CHAT_SMALL_FOLDER_THRESHOLD
+    from ...ai import CHAT_SMALL_FOLDER_THRESHOLD, chat_about_notes
 
     # Step 1: Fuzzy match folder
     match = _fuzzy_match_folder(config, query)

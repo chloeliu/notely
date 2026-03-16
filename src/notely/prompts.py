@@ -210,6 +210,7 @@ _MATCH_LABELS = {
     "exact": "Exact match",
     "near": "This looks like",
     "similar": "You may already have this",
+    "related": "Related note found",
 }
 
 

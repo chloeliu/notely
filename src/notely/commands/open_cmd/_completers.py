@@ -237,11 +237,51 @@ class _SlashCompleter(Completer):
                     yield from self._folder_completions(after)
                 return
 
-        # Complete /search — folder name as first word, then query
+        # Complete /search — folder with drill-down to notes
         if text.lower().startswith("/search "):
             after = text[8:]
-            if " " not in after:
-                yield from self._folder_completions(after)
+            words = after.split(None, 1)
+
+            # After folder + space: show notes in that folder
+            if len(words) == 2 or (len(words) == 1 and after.endswith(" ")):
+                folder_word = words[0]
+                resolved = self._resolve_folder_from_word(folder_word)
+                if resolved:
+                    space, group_slug = resolved
+                    partial_title = (words[1] if len(words) > 1 else "").lower()
+                    for nid, title, date in self._get_notes_in_folder(space, group_slug):
+                        if not partial_title or partial_title in title.lower():
+                            yield Completion(
+                                title[:60],
+                                start_position=-len(words[1]) if len(words) > 1 else 0,
+                                display_meta=f"({date})",
+                            )
+                return
+
+            # First word: folders with drill-down
+            partial = words[0] if words else ""
+            folder_key = partial.rstrip("/")
+
+            # Exact folder match ending with / → show notes inside
+            if partial.endswith("/") and folder_key and self._resolve_folder_from_word(folder_key):
+                space, group_slug = self._resolve_folder_from_word(folder_key)
+                for nid, title, date in self._get_notes_in_folder(space, group_slug):
+                    yield Completion(
+                        f"{folder_key}/{title[:60]}",
+                        start_position=-len(partial),
+                        display_meta=f"({date})",
+                    )
+
+            # Matching folders — always append / for drill-down
+            for comp in self._folder_completions(partial):
+                ctext = comp.text
+                if not ctext.endswith("/"):
+                    ctext += "/"
+                yield Completion(
+                    ctext,
+                    start_position=comp.start_position,
+                    display_meta=comp.display_meta,
+                )
             return
 
         # Complete /clip — folder names after URL (second word)
@@ -254,11 +294,11 @@ class _SlashCompleter(Completer):
                 yield from self._folder_completions(folder_part)
             return
 
-        # Complete /todo — subcommands, then IDs for done/reopen
+        # Complete /todo — subcommands + folders, then IDs for done/reopen
         if text.lower().startswith("/todo "):
             after = text[6:]
             if " " not in after:
-                # First word: subcommands
+                # First word: subcommands + folder completions
                 partial = after.lower()
                 for sub, hint in (
                     ("done", "mark a todo as done"),
@@ -267,6 +307,8 @@ class _SlashCompleter(Completer):
                 ):
                     if sub.startswith(partial):
                         yield Completion(sub, start_position=-len(after), display_meta=hint)
+                # Also offer folder completions for /todo FOLDER scoping
+                yield from self._folder_completions(after)
                 return
             words = after.split(None, 1)
             first = words[0].lower()
@@ -830,8 +872,38 @@ class _TodoCommandCompleter(Completer):
         ("q", "Exit todo mode"),
     ]
 
-    def __init__(self, folders: list[tuple[str, str, str]] | None = None):
+    def __init__(
+        self,
+        folders: list[tuple[str, str, str]] | None = None,
+        has_default_folder: bool = False,
+    ):
         self._folders = folders or []
+        self._has_default_folder = has_default_folder
+        # Todo fields for key= autocomplete
+        self._todo_fields = ["task", "owner", "due", "description"]
+
+    def _yield_field_completions(self, after_add: str):
+        """Yield key= field suggestions for the text after 'add '."""
+        set_fields: set[str] = set()
+        for token in after_add.split():
+            if "=" in token:
+                set_fields.add(token.split("=", 1)[0].lower())
+        if after_add.endswith(" ") or not after_add:
+            partial = ""
+        else:
+            partial = after_add.rsplit(None, 1)[-1]
+        if "=" in partial:
+            return
+        partial_lower = partial.lower()
+        for field in self._todo_fields:
+            if field.lower() not in set_fields:
+                suggestion = f"{field}="
+                if not partial or field.lower().startswith(partial_lower):
+                    yield Completion(
+                        suggestion,
+                        start_position=-len(partial),
+                        display_meta=f"set {field}",
+                    )
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -839,14 +911,26 @@ class _TodoCommandCompleter(Completer):
         if not stripped:
             return
 
-        # After 'add ' → folder autocomplete for the second word
+        # After 'add ' → field or folder completions depending on context
         # After 'move N ' → folder autocomplete for the third word
+        # Use text.lower() (not stripped) to detect trailing space after 'add'
+        text_lower = text.lstrip().lower()
         folder_partial = None
-        if stripped.startswith("add ") and self._folders:
+        if text_lower.startswith("add "):
+            after_add = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+            if self._has_default_folder:
+                # Folder already scoped — show field completions only
+                yield from self._yield_field_completions(after_add)
+                return
+            # No default folder — first word is folder, rest is free-form
             parts = text.split(None, 2)
-            if len(parts) <= 2:
+            if len(parts) <= 2 and self._folders:
                 folder_partial = parts[1] if len(parts) == 2 else ""
-        elif stripped.startswith("move ") and self._folders:
+            elif len(parts) > 2:
+                # Past folder word — show field completions
+                yield from self._yield_field_completions(parts[2] if len(parts) > 2 else "")
+                return
+        elif text_lower.startswith("move ") and self._folders:
             parts = text.split(None, 3)  # ['move', num, partial_folder?, ...]
             if len(parts) == 3:
                 folder_partial = parts[2]
@@ -892,4 +976,43 @@ class _TodoCommandCompleter(Completer):
                     cmd,
                     start_position=-len(text),
                     display_meta=desc,
+                )
+
+
+class _AddFieldCompleter(Completer):
+    """Suggest remaining `key=` completions while typing a record to add."""
+
+    def __init__(self, fields: list[str]):
+        self._fields = fields
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+
+        # Find which fields are already set (have key=something)
+        set_fields: set[str] = set()
+        for token in text.split():
+            if "=" in token:
+                key = token.split("=", 1)[0].lower()
+                set_fields.add(key)
+
+        # Current partial word
+        if text.endswith(" ") or not text:
+            partial = ""
+        else:
+            partial = text.rsplit(None, 1)[-1]
+
+        # If partial contains '=', user is typing a value — no completion
+        if "=" in partial:
+            return
+
+        partial_lower = partial.lower()
+        for field in self._fields:
+            if field.lower() in set_fields:
+                continue
+            suggestion = f"{field}="
+            if not partial or field.lower().startswith(partial_lower):
+                yield Completion(
+                    suggestion,
+                    start_position=-len(partial),
+                    display_meta=f"set {field}",
                 )

@@ -8,7 +8,6 @@ from rich.prompt import Prompt
 
 from ...config import NotelyConfig
 from ...db import Database, safe_json_loads
-
 from ._shared import console
 
 if TYPE_CHECKING:
@@ -16,7 +15,15 @@ if TYPE_CHECKING:
 
 
 def _handle_todo(config: NotelyConfig, arg: str, completer: _SlashCompleter) -> None:
-    """Handle /todo subcommands: interactive mode, done, reopen."""
+    """Handle /todo subcommands: interactive mode, done, reopen.
+
+    /todo              → interactive mode (your todos, all folders)
+    /todo FOLDER       → interactive mode scoped to folder
+    /todo done ID      → quick mark done
+    /todo reopen ID    → quick reopen
+    """
+    from ._shared import _fuzzy_match_folder
+
     parts = arg.strip().split(None, 1)
     subcmd = parts[0].lower() if parts else ""
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -34,10 +41,16 @@ def _handle_todo(config: NotelyConfig, arg: str, completer: _SlashCompleter) -> 
         else:
             console.print("[yellow]Usage: /todo reopen ID[/yellow]")
     else:
-        # /todo → interactive mode
+        # /todo or /todo FOLDER → interactive mode
+        folder_filter = None
+        if subcmd and subcmd not in ("all",):
+            match = _fuzzy_match_folder(config, arg.strip())
+            if match:
+                folder_filter = arg.strip()
+
         from ._todo_mode import _todo_mode
         try:
-            _todo_mode(config, completer)
+            _todo_mode(config, completer, initial_folder=folder_filter)
         except KeyboardInterrupt:
             console.print("\n[dim]Back to notely.[/dim]")
         completer.invalidate_todos()
@@ -217,41 +230,246 @@ def _show_list(config: NotelyConfig, folder_arg: str = "") -> None:
 
 
 def _show_search(config: NotelyConfig, query: str) -> None:
-    """Search notes. First word is tried as folder filter."""
+    """Interactive search mode. Folder resolved from /search arg, then prompt for queries.
+
+    Flow:
+      /search            → global search mode
+      /search folder     → folder-scoped search mode
+      /search folder q   → folder-scoped, run initial query immediately
+    """
     from ...models import SearchFilters
+    from ._shared import _fuzzy_match_folder
 
-    filters = None
-    search_query = query
+    space_filter = ""
+    group_filter = ""
+    folder_label = ""
+    initial_query = ""
 
-    # Try first word as folder
-    parts = query.split(None, 1)
-    if len(parts) == 2:
-        from ._shared import _fuzzy_match_folder
-        match = _fuzzy_match_folder(config, parts[0])
+    # Resolve folder from args — handle folder, folder/note-title, or plain query
+    if query.strip():
+        arg = query.strip().rstrip("/")
+
+        # First: try the whole arg as a folder (e.g. "projects/decipherhealth")
+        match = _fuzzy_match_folder(config, arg)
         if match:
-            space, group_slug, display_name, _ = match
-            filters = SearchFilters(space=space, folder=group_slug)
-            search_query = parts[1]
+            space_filter, group_filter, folder_label, _ = match
+        elif "/" in arg:
+            # Try splitting at each / to find folder + note title
+            slash_parts = arg.split("/")
+            found = False
+            for split_at in range(len(slash_parts) - 1, 0, -1):
+                folder_try = "/".join(slash_parts[:split_at])
+                note_try = "/".join(slash_parts[split_at:])
+                match = _fuzzy_match_folder(config, folder_try)
+                if match:
+                    space_f, group_f, _, _ = match
+                    # Check if the rest matches a note title
+                    with Database(config.db_path) as db:
+                        db.initialize()
+                        ctx = db.get_folder_context(space_f, group_f)
+                    for n in ctx.get("notes", []):
+                        if n["title"].lower().startswith(note_try.lower()):
+                            _show_note_detail(config, n["id"])
+                            return
+                    # Folder matched but no note — scope to folder
+                    space_filter, group_filter, folder_label = space_f, group_f, match[2]
+                    found = True
+                    break
+            if not found:
+                initial_query = arg
+        else:
+            # Try first word as folder, rest as query
+            parts = arg.split(None, 1)
+            match = _fuzzy_match_folder(config, parts[0])
+            if match:
+                space_filter, group_filter, folder_label, _ = match
+                initial_query = parts[1] if len(parts) > 1 else ""
+            else:
+                initial_query = arg
+
+    filters = SearchFilters(space=space_filter, folder=group_filter) if space_filter else None
+
+    # Build prompt label
+    if folder_label:
+        prompt_label = f"notely-search ({folder_label})"
+    else:
+        prompt_label = "notely-search"
+
+    console.print(f"[dim]Search mode. Type queries, 'q' to exit.[/dim]")
+
+    search_query = initial_query
+    while True:
+        if not search_query:
+            try:
+                search_query = Prompt.ask(f"{prompt_label}")
+            except (KeyboardInterrupt, EOFError):
+                break
+            if not search_query or search_query.strip().lower() == "q":
+                break
+            search_query = search_query.strip()
+
+        _run_search(config, search_query, filters, space_filter, group_filter)
+        search_query = ""  # clear for next iteration
+
+
+def _show_note_detail(config: NotelyConfig, note_id: str) -> None:
+    """Show a single note's full content (used when user picks a note from autocomplete)."""
+    from rich.panel import Panel
+
+    from ...storage import read_note
 
     with Database(config.db_path) as db:
         db.initialize()
-        rows = db.search(text_query=search_query, filters=filters, limit=10)
-
-    if not rows:
-        console.print(f"[dim]No results for \"{search_query}\".[/dim]")
+        row = db.get_note(note_id)
+    if not row:
+        console.print(f"[dim]Note {note_id} not found.[/dim]")
         return
 
-    from rich.table import Table
-    table = Table(show_lines=False, title=f"Search: {search_query}")
-    table.add_column("ID", style="dim", width=10)
-    table.add_column("Space", width=10)
-    table.add_column("Title", min_width=30)
-    table.add_column("Summary", width=40, style="dim")
+    note = read_note(config, row["file_path"])
+    if not note:
+        console.print(f"[dim]Could not read note file.[/dim]")
+        return
 
-    for r in rows:
-        table.add_row(r["id"], r["space"], r["title"], r["summary"][:40])
+    fp = row.get("file_path", "")
+    folder = "/".join(fp.split("/")[:2]) if "/" in fp else ""
 
-    console.print(table)
+    header = f"[bold]{note.title}[/bold]\n[dim]{folder} · {note.date}[/dim]"
+    if note.tags:
+        header += f"\n[dim]Tags: {', '.join(note.tags)}[/dim]"
+    if note.summary:
+        header += f"\n\n{note.summary}"
+
+    body = note.body.strip() if note.body else ""
+    content = header + ("\n\n" + body if body else "")
+    console.print(Panel(content, border_style="blue", padding=(1, 2)))
+
+
+def _extract_kwic(body: str, query: str, context_chars: int = 120) -> str | None:
+    """Extract keyword-in-context snippet from note body.
+
+    Finds the first occurrence of any query word in the body and returns
+    surrounding context with the match highlighted using >>> <<< markers.
+    """
+    body_lower = body.lower()
+    words = query.lower().split()
+
+    best_pos = -1
+    best_word = ""
+    for w in words:
+        pos = body_lower.find(w)
+        if pos != -1 and (best_pos == -1 or pos < best_pos):
+            best_pos = pos
+            best_word = w
+
+    if best_pos == -1:
+        return None
+
+    # Extract window around match
+    start = max(0, best_pos - context_chars // 2)
+    end = min(len(body), best_pos + len(best_word) + context_chars // 2)
+
+    snippet = body[start:end].strip()
+    # Clean up: start/end at word boundaries
+    if start > 0:
+        space = snippet.find(" ")
+        if space != -1 and space < 20:
+            snippet = "..." + snippet[space + 1:]
+        else:
+            snippet = "..." + snippet
+    if end < len(body):
+        space = snippet.rfind(" ")
+        if space != -1 and space > len(snippet) - 20:
+            snippet = snippet[:space] + "..."
+        else:
+            snippet += "..."
+
+    # Highlight all query words (case-insensitive)
+    for w in words:
+        import re
+        snippet = re.sub(
+            re.escape(w), lambda m: f">>>{m.group()}<<<",
+            snippet, flags=re.IGNORECASE,
+        )
+
+    # Collapse whitespace
+    snippet = " ".join(snippet.split())
+    return snippet
+
+
+def _run_search(
+    config: NotelyConfig,
+    search_query: str,
+    filters: "SearchFilters | None",
+    space_filter: str,
+    group_filter: str,
+) -> None:
+    """Execute a single search and display Google-style results with snippets."""
+    from ...storage import read_note
+
+    results: list[dict] = []
+    seen_ids: set[str] = set()
+
+    with Database(config.db_path) as db:
+        db.initialize()
+        # FTS search
+        fts_rows = db.search(text_query=search_query, filters=filters, limit=10,
+                             sort_by="relevance")
+        for r in fts_rows:
+            seen_ids.add(r["id"])
+            results.append(r)
+
+    # Vector fallback — fill up to 10
+    if len(results) < 10:
+        try:
+            from ...vectors import get_vector_store
+            vec = get_vector_store(config)
+            vec_results = vec.search_notes(
+                search_query, limit=10 - len(results),
+                space=space_filter or None,
+                group_slug=group_filter or None,
+            )
+            with Database(config.db_path) as db:
+                db.initialize()
+                for vr in vec_results:
+                    nid = vr["note_id"]
+                    if nid not in seen_ids:
+                        row = db.get_note(nid)
+                        if row:
+                            seen_ids.add(nid)
+                            results.append(row)
+        except Exception:
+            pass
+
+    if not results:
+        console.print(f"[dim]No results for \"{search_query}\".[/dim]\n")
+        return
+
+    console.print()
+    for i, r in enumerate(results, 1):
+        fp = r.get("file_path", "")
+        folder = "/".join(fp.split("/")[:2]) if "/" in fp else r.get("space", "")
+
+        # Title line
+        console.print(
+            f"  [bold]{i}. {r['title']}[/bold]"
+            f"  [dim]{folder} · {r['date']}[/dim]"
+        )
+
+        # Read full note body to find keyword-in-context snippet
+        snippet = None
+        note = read_note(config, fp) if fp else None
+        if note and note.body:
+            snippet = _extract_kwic(note.body, search_query)
+
+        # Fall back to summary if no keyword match found in body
+        if not snippet:
+            snippet = (r.get("summary") or "")[:150]
+
+        if snippet:
+            highlighted = snippet.replace(">>>", "[bold yellow]").replace("<<<", "[/bold yellow]")
+            console.print(f"     [dim]{highlighted}[/dim]")
+
+        console.print()
 
 
 def _show_spaces(config: NotelyConfig) -> None:
@@ -518,27 +736,21 @@ def _handle_database_command(
                 console.print(f"[yellow]No record with ID {ref_id}.[/yellow]")
             return
 
-        # /<db> add ENTITY key value
+        # /<db> add — free-form input, AI-parsed
         if subcmd == "add":
-            add_parts = arg.strip().split(None, 3)
-            if len(add_parts) < 4:
-                console.print(f"[yellow]Usage: /{db_name} add ENTITY key value[/yellow]")
-                return
-            entity, key, value = add_parts[1], add_parts[2], add_parts[3]
+            raw_input = arg.strip()[4:].strip() if len(arg.strip()) > 3 else ""
             # Confirm new database creation on first record
             if not db.database_exists(db_name):
                 from ._shared import _confirm_new_database
                 if not _confirm_new_database(config, db_name):
                     console.print("[dim]Cancelled.[/dim]")
                     return
-            ref_id = db.add_reference(
-                entity=entity, key=key, value=value,
-                snippet_type=db_name,
+            from ...storage import universal_add
+            universal_add(
+                config, db, db_name,
+                raw_input=raw_input,
                 space=wf_space, group_slug=wf_group,
             )
-            scope = f" ({wf_space}/{wf_group})" if wf_space else ""
-            console.print(f"[green]Saved:[/green] {entity}.{key} = {value}{scope} (#{ref_id})")
-            sync_database_indexes(config, db)
             return
 
         # /<db> show ENTITY — detailed view
@@ -564,24 +776,6 @@ def _handle_database_command(
                 else:
                     console.print(f"\n  [dim]No notes mentioning {entity}.[/dim]")
             console.print()
-            return
-
-        # /<db> ENTITY key value — inline add
-        if len(parts) >= 3:
-            entity, key, value = parts[0], parts[1], parts[2]
-            # Confirm new database creation on first record
-            if not db.database_exists(db_name):
-                from ._shared import _confirm_new_database
-                if not _confirm_new_database(config, db_name):
-                    console.print("[dim]Cancelled.[/dim]")
-                    return
-            ref_id = db.add_reference(
-                entity=entity, key=key, value=value,
-                snippet_type=db_name,
-                space=wf_space, group_slug=wf_group,
-            )
-            console.print(f"[green]Saved:[/green] {entity}.{key} = {value} (#{ref_id})")
-            sync_database_indexes(config, db)
             return
 
         # /<db> QUERY — FTS search or entity filter
@@ -713,6 +907,7 @@ def _handle_workflow(config: NotelyConfig, arg: str) -> None:
 
         elif subcmd == "pull":
             import asyncio
+
             from notely_agent.api import workflow_pull
             wf_name = parts[1].strip() if len(parts) > 1 else None
             if wf_name:
@@ -896,7 +1091,7 @@ def _rmdir(config: NotelyConfig, path: str) -> None:
 
 def _delete_note(config: NotelyConfig, note_id: str) -> None:
     """Delete a note — removes file, raw file, DB entry, and vector."""
-    from ...storage import delete_note_files, sync_todo_index, sync_ideas_index
+    from ...storage import delete_note_files, sync_ideas_index, sync_todo_index
     from ...vectors import try_vector_delete_note
 
     note_id = note_id.strip()
@@ -927,6 +1122,7 @@ def _edit_note_inline(config: NotelyConfig, note_id: str) -> None:
     """Open a note in $EDITOR and re-index on save."""
     import os
     import subprocess
+
     from ...storage import absolute_path, read_note
 
     note_id = note_id.strip()

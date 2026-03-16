@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Prompt
@@ -32,39 +33,69 @@ def _get_all_folders(config: NotelyConfig) -> list[tuple[str, str, str]]:
             db.initialize()
             dirs = db.get_all_directories()
     except Exception:
-        return []
+        dirs = []
 
     result: list[tuple[str, str, str]] = []
-    seen_spaces: set[str] = set()
+    seen: set[str] = set()  # track "space/slug" to avoid duplicates
 
-    # First pass: space-level entries for all spaces
-    # Use directory display_name for spaces without groups, config display_name for others
-    spaces_with_groups: set[str] = set()
+    # --- From DB directories ---
     space_display_from_dir: dict[str, str] = {}
     for d in dirs:
-        if d["group_slug"] and not d.get("subgroup_slug"):
-            spaces_with_groups.add(d["space"])
         if not d["group_slug"]:
             space_display_from_dir[d["space"]] = d["display_name"]
 
-    for space_name in sorted({d["space"] for d in dirs}):
+    # Space-level entries from both config and DB
+    all_spaces = set(config.space_names()) | {d["space"] for d in dirs}
+    for space_name in sorted(all_spaces):
         if space_name in space_display_from_dir:
             display = space_display_from_dir[space_name]
         else:
             space_cfg = config.get_space(space_name)
             display = space_cfg.display_name if space_cfg else space_name.title()
         result.append((space_name, display, space_name))
+        seen.add(space_name)
 
-    # Second pass: group-level dirs
+    # Group-level dirs from DB
     for d in dirs:
         if d["group_slug"] and not d.get("subgroup_slug"):
-            result.append((d["group_slug"], d["display_name"], d["space"]))
+            key = f"{d['space']}/{d['group_slug']}"
+            if key not in seen:
+                result.append((d["group_slug"], d["display_name"], d["space"]))
+                seen.add(key)
 
-    # Third pass: subgroup-level dirs
+    # Subgroup-level dirs from DB
     for d in dirs:
         if d["group_slug"] and d.get("subgroup_slug"):
             slug = f"{d['group_slug']}/{d['subgroup_slug']}"
-            result.append((slug, d["display_name"], d["space"]))
+            key = f"{d['space']}/{slug}"
+            if key not in seen:
+                result.append((slug, d["display_name"], d["space"]))
+                seen.add(key)
+
+    # --- Fallback: scan filesystem for folders not in DB ---
+    # This ensures autocomplete works even before reindex populates directories
+    notes_dir = config.notes_dir
+    if notes_dir.is_dir():
+        for space_dir in sorted(notes_dir.iterdir()):
+            if not space_dir.is_dir() or space_dir.name.startswith("."):
+                continue
+            space_name = space_dir.name
+            # Add space-level if not already present
+            if space_name not in seen:
+                space_cfg = config.get_space(space_name)
+                display = space_cfg.display_name if space_cfg else space_name.title()
+                result.append((space_name, display, space_name))
+                seen.add(space_name)
+            # Add group-level folders
+            for group_dir in sorted(space_dir.iterdir()):
+                if not group_dir.is_dir() or group_dir.name.startswith("."):
+                    continue
+                key = f"{space_name}/{group_dir.name}"
+                if key not in seen:
+                    display = group_dir.name.replace("-", " ").title()
+                    result.append((group_dir.name, display, space_name))
+                    seen.add(key)
+
     return result
 
 
@@ -79,42 +110,14 @@ def _fuzzy_match_folder(
     Used in file_path LIKE queries (empty = all notes in space).
     If ambiguous, shows a numbered picker. If no arg, shows all folders.
     """
-    with Database(config.db_path) as db:
-        db.initialize()
-        dirs = db.get_all_directories()
-
-    # Build candidate list at all levels: spaces, groups, subgroups
-    # Each entry is (dict, folder_path) where folder_path is the slug for callers
+    # Build candidate list from _get_all_folders (includes DB + filesystem fallback)
+    folders = _get_all_folders(config)
     all_folders: list[tuple[dict, str]] = []
-    seen_spaces: set[str] = set()
-    space_display_from_dir: dict[str, str] = {}
-
-    # Collect info for space-level entries
-    for d in dirs:
-        if not d["group_slug"]:
-            space_display_from_dir[d["space"]] = d["display_name"]
-
-    # First pass: space-level entries for all spaces
-    for space_name in sorted({d["space"] for d in dirs}):
-        if space_name in space_display_from_dir:
-            display = space_display_from_dir[space_name]
-        else:
-            space_cfg = config.get_space(space_name)
-            display = space_cfg.display_name if space_cfg else space_name.title()
-        # Synthesize a dict-like entry for the space level
-        space_entry = {"space": space_name, "group_slug": "", "display_name": display}
-        all_folders.append((space_entry, ""))
-        seen_spaces.add(space_name)
-
-    # Second pass: group-level dirs
-    for d in dirs:
-        if d["group_slug"] and not d.get("subgroup_slug"):
-            all_folders.append((d, d["group_slug"]))
-    # Third pass: subgroup-level dirs
-    for d in dirs:
-        if d["group_slug"] and d.get("subgroup_slug"):
-            folder_path = f"{d['group_slug']}/{d['subgroup_slug']}"
-            all_folders.append((d, folder_path))
+    for slug, display, space in folders:
+        is_space = slug == space
+        folder_path = "" if is_space else slug
+        entry = {"space": space, "group_slug": folder_path, "display_name": display}
+        all_folders.append((entry, folder_path))
 
     if not all_folders:
         return None
@@ -179,8 +182,8 @@ def _working_folder_query(working_folder: dict) -> str:
 
 def _ensure_vectors(config: NotelyConfig, db: Database) -> None:
     """Auto-build vectors if missing, then refresh directory descriptions."""
-    from ...vectors import get_vector_store
     from ...routing import refresh_directory_descriptions
+    from ...vectors import get_vector_store
 
     try:
         vec = get_vector_store(config)
@@ -220,7 +223,7 @@ def _confirm_new_database(config: NotelyConfig, db_name: str) -> bool:
 
 def _resync(config: NotelyConfig) -> None:
     """Re-sync DB from files on disk. Picks up manual edits."""
-    from ...storage import sync_todo_index, sync_ideas_index
+    from ...storage import sync_ideas_index, sync_todo_index
     from ...vectors import get_vector_store
 
     with Database(config.db_path) as db:

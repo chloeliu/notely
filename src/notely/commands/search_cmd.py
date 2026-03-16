@@ -87,6 +87,28 @@ def search_cmd(
             click.echo(json.dumps({"status": "ok", "count": len(results), "results": results}, indent=2))
             return
 
+    # Vector fallback — fill up to limit
+    if query and len(rows) < limit:
+        try:
+            from ..vectors import get_vector_store
+            vec = get_vector_store(config)
+            vec_results = vec.search_notes(
+                query, limit=limit - len(rows),
+                space=space, group_slug=None,
+            )
+            seen_ids = {r["id"] for r in rows}
+            with Database(config.db_path) as db:
+                db.initialize()
+                for vr in vec_results:
+                    nid = vr["note_id"]
+                    if nid not in seen_ids:
+                        row = db.get_note(nid)
+                        if row:
+                            seen_ids.add(nid)
+                            rows.append(row)
+        except Exception:
+            pass  # Vectors unavailable
+
     if not rows:
         console.print("[dim]No results found.[/dim]")
         return
@@ -94,16 +116,18 @@ def search_cmd(
     table = Table(title=f"Search Results ({len(rows)})", show_lines=False)
     table.add_column("ID", style="dim", width=10)
     table.add_column("Date", width=12)
-    table.add_column("Space", width=10)
+    table.add_column("Folder", width=14)
     table.add_column("Title", min_width=30)
     table.add_column("Summary", max_width=50)
 
     for r in rows:
         summary = r["summary"][:50] + "..." if len(r["summary"]) > 50 else r["summary"]
+        fp = r.get("file_path", "")
+        folder = "/".join(fp.split("/")[:2]) if "/" in fp else r.get("space", "")
         table.add_row(
             r["id"],
             r["date"],
-            r["space"],
+            folder,
             r["title"],
             summary,
         )

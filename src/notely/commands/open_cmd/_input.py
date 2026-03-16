@@ -13,9 +13,8 @@ from ...config import NotelyConfig
 from ...db import Database
 from ...models import NoteRouting
 from ...prompts import confirm_action
-from ...storage import classify_input_size, show_merge_preview, edit_merge_result, apply_merge, preview_and_save_records
-
-from ._shared import console, _fuzzy_match_folder
+from ...storage import apply_merge, classify_input_size, edit_merge_result, preview_and_save_records, show_merge_preview
+from ._shared import _fuzzy_match_folder, console
 
 
 class _TypedInput(str):
@@ -86,8 +85,8 @@ def _read_block(completer=None, prompt: str = "notely-notetaker> ") -> str:
         else:
             buf.insert_text('\n')
 
-    from prompt_toolkit.filters import Condition
     from prompt_toolkit.document import Document as _Doc
+    from prompt_toolkit.filters import Condition
 
     @Condition
     def _should_complete():
@@ -196,13 +195,18 @@ def _extract_inline_instruction(text: str) -> tuple[str | None, str]:
 def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | None = None) -> None:
     """Process raw text: route via vectors, then structure with AI."""
     from ...ai import (
-        structure_only, merge_with_existing, mask_secrets, unmask_secrets,
-        ListItemResult, SnippetResult, RecordsOnlyResult,
+        ListItemResult,
+        RecordsOnlyResult,
+        SnippetResult,
+        mask_secrets,
+        merge_with_existing,
+        structure_only,
+        unmask_secrets,
     )
-    from ...files import is_file_path, extract_text, copy_attachment
+    from ...files import copy_attachment, extract_text, is_file_path
     from ...models import AIStructuredOutput, InputSize
-    from ...routing import route_input, ensure_directory_indexed, extract_context
-    from ...storage import sync_todo_index, sync_ideas_index
+    from ...routing import ensure_directory_indexed, extract_context, route_input
+    from ...storage import sync_ideas_index, sync_todo_index
     from ...vectors import get_vector_store, try_vector_sync_note
 
     # Check if input is a file path
@@ -559,6 +563,7 @@ def _process_input(config: NotelyConfig, raw_text: str, folder_default: dict | N
 def _handle_note_result(config, db, result, raw_text, input_size, paste_content=None, attachment_path=None):
     """Handle AI returning a full note — build Note, preview, save."""
     import uuid
+
     from ...files import copy_attachment
     from ...models import Note, Refinement
     from ...storage import generate_file_path, save_and_sync
@@ -850,11 +855,13 @@ def _handle_records_only_result(config, db, data, routing, secret_mapping=None):
 def _clip_url(config: NotelyConfig, arg: str, working_folder: dict) -> None:
     """Clip a web page: fetch via Firecrawl, structure with AI, save."""
     import uuid
-    from ...ai import structure_only, mask_secrets, unmask_secrets, ListItemResult, SnippetResult, RecordsOnlyResult
+
+    from ...ai import ListItemResult, RecordsOnlyResult, SnippetResult, mask_secrets, structure_only, unmask_secrets
     from ...models import Note, NoteRouting, Refinement
-    from ...routing import route_input, ensure_directory_indexed, RoutingDecision
+    from ...routing import RoutingDecision, ensure_directory_indexed, route_input
     from ...storage import (
-        generate_file_path, save_and_sync,
+        generate_file_path,
+        save_and_sync,
     )
     from ...vectors import get_vector_store
 

@@ -2107,6 +2107,217 @@ def _confirm_database_choice(db: Any, suggested: str, console: Any, Prompt: Any)
         return None
 
 
+def universal_add(
+    config: NotelyConfig,
+    db: "Database",
+    db_name: str,
+    raw_input: str = "",
+    space: str = "",
+    group_slug: str = "",
+    default_owner: str = "",
+) -> dict | None:
+    """Universal add for any database. AI-parses free-form text, previews, confirms, saves.
+
+    Returns the parsed fields dict on success, None on skip/cancel.
+    """
+    from prompt_toolkit import PromptSession
+    from rich.console import Console
+    from rich.panel import Panel
+
+    from .ai import parse_record_with_ai
+    from .prompts import confirm_action
+
+    console = Console()
+    is_todo = db_name == "todo"
+
+    # Get database fields
+    if is_todo:
+        fields = ["task", "owner", "due"]
+    else:
+        fields = db.get_database_fields(db_name) or []
+        # Ensure entity is in the list for non-todo databases
+        if "entity" not in [f.lower() for f in fields]:
+            fields = ["entity"] + fields
+
+    # Always include description
+    all_fields = fields + (["description"] if "description" not in fields else [])
+
+    # Prompt for input if not provided
+    if not raw_input.strip():
+        from prompt_toolkit.key_binding import KeyBindings
+
+        from .commands.open_cmd._completers import _AddFieldCompleter
+
+        completer = _AddFieldCompleter(all_fields)
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _handle_enter(event):
+            buf = event.app.current_buffer
+            text = buf.text.strip()
+            if not text or buf.text.endswith("\n"):
+                # Empty or double-enter → submit
+                buf.validate_and_handle()
+            else:
+                buf.insert_text("\n")
+
+        try:
+            raw_input = PromptSession(
+                completer=completer, complete_while_typing=True,
+                key_bindings=kb, multiline=True,
+            ).prompt(f"  {db_name}> ")
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw_input.strip():
+            return None
+
+    # Parse with AI
+    db_description = db.get_database_description(db_name) or ""
+    console.print("[dim]Parsing...[/dim]")
+    parsed = parse_record_with_ai(
+        raw_input, db_name, all_fields,
+        db_description=db_description,
+    )
+
+    if not parsed:
+        console.print("[yellow]Could not parse input. Try again with more detail.[/yellow]")
+        return None
+
+    # For todos: fill default owner if empty
+    if is_todo and not parsed.get("owner") and default_owner:
+        parsed["owner"] = default_owner
+
+    # Primary field name
+    primary_key = "task" if is_todo else "entity"
+
+    # Preview + confirm
+    def _preview():
+        lines = []
+        primary_val = parsed.get(primary_key, "")
+        label = "Task" if is_todo else "Entity"
+        lines.append(f"[bold]{label}:[/bold] {primary_val}")
+        for k, v in parsed.items():
+            if k == primary_key:
+                continue
+            lines.append(f"[bold]{k}:[/bold] {v}")
+        if space or group_slug:
+            folder = f"{space}/{group_slug}" if group_slug else space
+            lines.append(f"[dim]folder: {folder}[/dim]")
+        panel_title = f"New {db_name}"
+        console.print(Panel("\n".join(lines), title=panel_title, border_style="green"))
+
+    def _edit():
+        """Let user edit individual fields."""
+        field_list = [primary_key] + [k for k in parsed if k != primary_key]
+        while True:
+            console.print()
+            for i, k in enumerate(field_list, 1):
+                v = parsed.get(k, "")
+                console.print(f"  [bold]{i}.[/bold] {k} = {v}")
+            try:
+                pick = PromptSession().prompt("\n  Edit field # (q to finish): ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if pick.strip().lower() in ("q", ""):
+                break
+            try:
+                idx = int(pick.strip()) - 1
+                if 0 <= idx < len(field_list):
+                    key = field_list[idx]
+                    try:
+                        new_val = PromptSession().prompt(
+                            f"  {key}: ", default=parsed.get(key, "")
+                        )
+                    except (EOFError, KeyboardInterrupt):
+                        continue
+                    if new_val.strip():
+                        parsed[key] = new_val.strip()
+                    elif key != primary_key:
+                        parsed.pop(key, None)
+            except ValueError:
+                pass
+
+    def _revise():
+        """Re-parse with user's revision instruction."""
+        try:
+            instruction = PromptSession().prompt("  What should I change? ")
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not instruction.strip():
+            return
+        console.print("[dim]Revising...[/dim]")
+        revised = parse_record_with_ai(
+            f"{raw_input}\n\nRevision: {instruction}",
+            db_name, all_fields, db_description=db_description,
+        )
+        if revised:
+            parsed.clear()
+            parsed.update(revised)
+            if is_todo and not parsed.get("owner") and default_owner:
+                parsed["owner"] = default_owner
+
+    confirmed = confirm_action(
+        preview_fn=_preview,
+        verb="save",
+        edit_fn=_edit,
+        revise_fn=_revise,
+    )
+    if not confirmed:
+        return None
+
+    # Save
+    primary_val = parsed.get(primary_key, "").strip()
+    if not primary_val:
+        console.print("[yellow]No value for primary field. Skipped.[/yellow]")
+        return None
+
+    description = parsed.pop("description", "")
+
+    if is_todo:
+        owner = parsed.get("owner", default_owner)
+        due = parsed.get("due")
+        item_id = db.add_todo(
+            owner=owner, task=primary_val, due=due,
+            space=space or None, group_slug=group_slug or None,
+        )
+        sync_todo_index(config, db)
+        parsed["id"] = item_id
+        console.print(f"[green]Added:[/green] {primary_val}")
+    else:
+        # Save each field as a separate snippet row
+        saved_count = 0
+        for k, v in parsed.items():
+            if k == primary_key:
+                continue
+            # Check for existing entity+key duplicate
+            existing = db.find_existing_snippet(primary_val, k, db_name)
+            if existing:
+                console.print(
+                    f"  [dim]{primary_val}.{k}[/dim] already exists "
+                    f"(current: {existing['value']})"
+                )
+                from .prompts import pick_from_list
+                choice = pick_from_list(
+                    [],
+                    extras=[("u", "Update"), ("s", "Skip")],
+                    prompt_text=f"  {primary_val}.{k}",
+                )
+                if choice == "u":
+                    db.update_snippet(existing["id"], v)
+                    saved_count += 1
+                continue
+            db.add_reference(
+                entity=primary_val, key=k, value=v,
+                description=description, snippet_type=db_name,
+                space=space, group_slug=group_slug,
+            )
+            saved_count += 1
+        sync_database_indexes(config, db)
+        console.print(f"[green]Saved:[/green] {primary_val} — {saved_count} field(s)")
+
+    return parsed
+
+
 def sync_database_indexes(config: NotelyConfig, db: "Database") -> None:
     """Regenerate one CSV per user-defined database (snippet_type) from DB."""
     from .db import safe_parse_tags

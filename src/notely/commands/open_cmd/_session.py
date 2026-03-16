@@ -7,15 +7,14 @@ from rich.panel import Panel
 
 from ...config import NotelyConfig
 from ...db import Database
-
 from ._shared import (
+    _confirm_new_database,
+    _ensure_vectors,
+    _fuzzy_match_folder,
+    _resync,
+    _working_folder_query,
     console,
     logger,
-    _fuzzy_match_folder,
-    _working_folder_query,
-    _ensure_vectors,
-    _resync,
-    _confirm_new_database,
 )
 
 HELP_TEXT = """
@@ -91,7 +90,7 @@ def open_cmd(ctx: click.Context) -> None:
 
     pruned = db.prune_missing(config)
     if pruned:
-        from ...storage import sync_todo_index, sync_ideas_index
+        from ...storage import sync_ideas_index, sync_todo_index
         sync_todo_index(config, db)
         sync_ideas_index(config, db)
         console.print(f"[dim]Synced: removed {pruned} deleted note(s) from index.[/dim]")
@@ -126,7 +125,7 @@ def open_cmd(ctx: click.Context) -> None:
     console.print()
 
     # Show running timers from previous session
-    from ...timer import get_running_timers, elapsed_since
+    from ...timer import elapsed_since, get_running_timers
     running = get_running_timers(config)
     for t in running:
         desc = t.get("description", "untitled")
@@ -136,8 +135,9 @@ def open_cmd(ctx: click.Context) -> None:
 
     # Run startup agents (e.g., granola-sync) — fire-and-forget
     try:
-        from notely_agent.api import run_startup_agents
         import asyncio
+
+        from notely_agent.api import run_startup_agents
         new_items = asyncio.run(run_startup_agents())
         if new_items:
             console.print(f"[cyan]{len(new_items)} new item(s) added to inbox[/cyan]")
@@ -316,17 +316,25 @@ def open_cmd(ctx: click.Context) -> None:
         console.print()
 
 
+from ._agent import _agent_connect, _agent_disconnect, _agent_dispatch, _chat_mode
 from ._completers import _SlashCompleter
-from ._input import _read_block, _process_input, _clip_url
 from ._handlers import (
-    _handle_todo, _show_ideas,
-    _show_list, _show_search, _show_spaces, _timer_dispatch,
-    _handle_database_command, _show_secrets, _handle_workflow,
-    _mkdir, _rmdir, _delete_note, _edit_note_inline,
+    _delete_note,
+    _edit_note_inline,
+    _handle_database_command,
+    _handle_todo,
+    _handle_workflow,
+    _mkdir,
+    _rmdir,
+    _show_ideas,
+    _show_list,
+    _show_search,
+    _show_secrets,
+    _show_spaces,
+    _timer_dispatch,
 )
 from ._inbox import _handle_inbox
-from ._agent import _agent_dispatch, _agent_connect, _agent_disconnect, _chat_mode
-
+from ._input import _clip_url, _process_input, _read_block
 
 _known_db_cache: set[str] | None = None
 

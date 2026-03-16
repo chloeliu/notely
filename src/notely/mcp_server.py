@@ -14,8 +14,10 @@ from .ai import build_taxonomy_context
 from .config import NotelyConfig
 from .db import Database, safe_json_loads, safe_parse_tags
 from .models import ActionItem, ActionItemStatus, InputSize, Note, Refinement, SearchFilters
+
 logger = logging.getLogger(__name__)
 
+from .routing import DIST_GOOD_MATCH
 from .storage import (
     delete_note_files,
     generate_file_path,
@@ -25,7 +27,6 @@ from .storage import (
     update_action_status,
     write_note,
 )
-from .routing import DIST_GOOD_MATCH
 from .vectors import get_vector_store, try_vector_delete_note, try_vector_sync_note
 
 mcp = FastMCP(
@@ -93,6 +94,7 @@ def _cleanup() -> None:
 
 
 import atexit
+
 atexit.register(_cleanup)
 
 
@@ -224,7 +226,8 @@ def save_note(
     source_file = None
     if attachment_paths:
         from pathlib import Path as _Path
-        from .files import copy_attachment, TEXT_EXTENSIONS
+
+        from .files import TEXT_EXTENSIONS, copy_attachment
         for ap in attachment_paths:
             p = _Path(ap)
             if p.is_file():
@@ -644,6 +647,7 @@ def update_note(
     # Copy new attachments
     if attachment_paths:
         from pathlib import Path as _Path
+
         from .files import copy_attachment
         sm = note.space_metadata
         space_cfg = config.get_space(note.space)
