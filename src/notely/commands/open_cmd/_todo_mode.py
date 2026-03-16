@@ -396,12 +396,26 @@ def _todo_done_direct(
     num_to_id: dict[int, int],
     completer: "_SlashCompleter",
 ) -> None:
-    """Mark done with inline number/id: 'done 3'."""
-    item_id = _resolve_num_or_id(text, num_to_id)
-    if item_id is None:
+    """Mark done with inline numbers: 'done 3', 'done 1 2 4 7', 'done 1-5'."""
+    nums: list[int] = []
+    for tok in text.split():
+        if "-" in tok:
+            try:
+                lo, hi = tok.split("-", 1)
+                nums.extend(range(int(lo), int(hi) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                nums.append(int(tok))
+            except ValueError:
+                pass
+    if not nums:
         console.print(f"[yellow]Could not resolve '{text}'.[/yellow]")
         return
-    _do_mark_done(config, item_id, completer)
+    for n in nums:
+        item_id = num_to_id.get(n) or n
+        _do_mark_done(config, item_id, completer)
 
 
 def _do_mark_done(config: NotelyConfig, item_id: int, completer: "_SlashCompleter") -> None:
