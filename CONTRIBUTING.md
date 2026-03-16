@@ -6,7 +6,7 @@ Thanks for your interest in contributing! Notely is a structured note system for
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/notely.git
+git clone https://github.com/chloeliu/notely.git
 cd notely
 
 # Create a virtual environment

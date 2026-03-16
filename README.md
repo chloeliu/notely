@@ -82,6 +82,26 @@ You can always add folders later with `/mkdir` inside `notely open`, or let the 
 
 After init, run `notely open` to start an interactive session. Paste anything — meeting notes, Slack threads, quick thoughts. The AI structures it and files it in the right folder as a clean markdown file.
 
+## Demos
+
+### Capture notes
+
+Paste meeting notes, AI structures with preview, save to folder:
+
+![Note capture demo](demos/note-capture.gif)
+
+### Search and chat
+
+`/search` with folder autocomplete, KWIC results, then `/chat` with AI Q&A:
+
+![Search and chat demo](demos/search-and-chat.gif)
+
+### Manage todos
+
+`/todo` folder-scoped view, AI-parsed `add` with field autocomplete, revise with AI:
+
+![Todo management demo](demos/todo-add.gif)
+
 ## What It Looks Like
 
 ### Capturing notes
@@ -100,38 +120,48 @@ notely-notetaker> [paste your meeting notes, Slack thread, anything]
     [ ] Send API spec — Jake, due Fri
   ──────────────────────────────────────
 
-  [Y]es, save / [e]dit first / [n]o, skip: y
+  [Y]es, save / [e]dit / [r]evise with AI / [n]o, skip: y
   Saved: clients/acme/2026-03-05_acme-kickoff.md
 ```
 
 ### Managing todos
 
 ```
-notely-notetaker> /todo
+notely-notetaker> /todo projects/acme
 
-  ★ Today
-  ─────────────────────────────────────
-    1. Deploy v2 to staging              Chloe · due today
-    2. Fix auth bug                      Chloe · due Fri
+  No open todos for chloe. 3 assigned to others.
 
-  Acme
-  ─────────────────────────────────────
-    3. Send API spec                     Jake · due Fri
-    4. Review SOW                        Chloe · due Mon
+notely-todo (Acme)> add Schedule kickoff with Canvas Medical due=friday
 
-  4 open — done · add · today · due · timer · q
+  Preview
+  ──────────────────────────────────
+  Task:   Schedule kickoff with Canvas Medical
+  Owner:  Chloe
+  Due:    2026-03-20
+  Folder: projects/acme
+  ──────────────────────────────────
+
+  [Y]es, save / [e]dit / [r]evise with AI / [n]o, skip: y
+  Added.
 ```
+
+Type naturally or use `key=value` syntax — AI (Haiku) parses it. Tab completion shows available fields as hints.
 
 ### Searching
 
-```bash
-notely search "API integration"
+```
+notely-notetaker> /search acme
 
-  1. Acme Kickoff Call (2026-03-05) [clients/acme]
-     Acme wants Q3 launch, API integration scoping needed first.
+Search mode. Type queries, 'q' to exit.
+notely-search (Acme)> API integration
 
-  2. Platform Architecture (2026-02-28) [projects/vault]
-     REST API design decisions for the Vault project.
+  1. Acme Kickoff Call  clients/acme · 2026-03-05
+     ...Acme wants Q3 launch, API integration scoping needed first...
+
+  2. Platform Architecture  projects/vault · 2026-02-28
+     ...REST API design decisions for the Vault project...
+
+notely-search (Acme)> q
 ```
 
 ### Chatting with your notes
@@ -160,8 +190,8 @@ flowchart TD
     F -->|"No match"| H["Route to folder"]
     G --> I["Saved as Markdown"]
     H --> I
-    D --> I
-    E --> J["Saved to index"]
+    D --> J["Saved to database"]
+    E --> J
     I --> K["Indexed + searchable"]
     J --> K
 
@@ -230,11 +260,14 @@ Both paths produce the same markdown files and search index.
 |---------|-------------|
 | `notely open` | Interactive session — paste notes, drag files, slash commands |
 | `notely dump` | One-shot: pipe text in, AI structures, save |
-| `notely search <query>` | Full-text search across all notes |
+| `notely search <query>` | Full-text + semantic search across all notes |
 | `notely todo` | View and manage action items |
+| `notely ideas` | View and manage ideas pipeline |
 | `notely list` | List recent notes |
 | `notely show <id>` | Display a full note |
 | `notely edit <id>` | Open in your editor, re-indexes on save |
+| `notely spaces` | Show workspace overview (spaces, groups, note counts) |
+| `notely query` | JSON query API for agents and scripts |
 | `notely init` | Set up a new workspace |
 | `notely reindex` | Rebuild search index from markdown files |
 
@@ -242,20 +275,29 @@ Both paths produce the same markdown files and search index.
 
 | Command | What it does |
 |---------|-------------|
-| `/todo` | Interactive todo mode — mark done, add tasks, flag for today, start timers |
+| `/todo [folder]` | Interactive todo mode — AI-parsed add, mark done, flag for today, start timers |
+| `/search <folder\|query>` | Interactive search mode — hybrid FTS + semantic, keyword-highlighted snippets |
 | `/chat <folder>` | AI chat scoped to a folder's notes |
-| `/timer <folder> <desc>` | Time tracking |
+| `/<db_name>` | Database interactive mode — AI-parsed add, update, delete, browse records |
 | `/clip <url>` | Save a web page as a note |
-| `/<db_name>` | Enter database interactive mode — add, update, delete, browse records |
-| `/secret` | View stored secrets (`/secret service key` to reveal a value) |
+| `/timer <folder> <desc>` | Time tracking — start, stop, retroactive logging |
 | `/folder <name>` | Set a working folder for the session |
 | `/edit <id>` | Edit a note in your editor |
+| `/delete <id>` | Delete a note (with confirmation) |
+| `/list [folder]` | List recent notes |
+| `/secret` | View stored secrets (`/secret service key` to reveal a value) |
+| `/agent [folder]` | Conversational AI agent with external service access |
+| `/workflow` | Create, list, and run automated YAML workflows |
+| `/inbox` | Review items deposited by workflows |
+| `/sync` | Re-sync all files to database |
+| `/mkdir <path>` | Create a new folder |
+| `/rmdir <path>` | Remove an empty folder |
 
 ## Key Features
 
 **Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste an account number or NPI and it stores a searchable database record. You never have to tell it which type — it figures it out.
 
-**Databases** — Notely has a built-in lightweight database system for structured records. Todos, contacts, providers, plain facts — each is a "database" you can query, browse, and export. The AI extracts records inline when structuring notes (one call produces both the note and its todos/contacts). Type `/<name>` (e.g. `/contacts`, `/todo`) to enter interactive mode. Create new databases on the fly — just paste data and notely walks you through setup (name, fields, auto-extract from future notes). Each database gets its own CSV export and full-text search.
+**Databases** — Notely has a built-in lightweight database system for structured records. Todos, contacts, providers, plain facts — each is a "database" you can query, browse, and export. The AI extracts records inline when structuring notes (one call produces both the note and its todos/contacts). Type `/<name>` (e.g. `/contacts`, `/todo`) to enter interactive mode. Add records with natural language — `add Dr. Smith phone 555-1234, npi 1234567890` or use `key=value` syntax. AI (Haiku) parses free-form input into structured fields with date conversion and field mapping. Create new databases on the fly — just paste data and notely walks you through setup. Each database gets its own CSV export and full-text search.
 
 **Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge the new information in.
 
@@ -275,7 +317,7 @@ Retrieve secrets with `/secret` inside `notely open` — tab-completes service a
 
 **File attachments** — Drag or paste file paths. Supports text, PDF (with table extraction), and images (described via Vision API).
 
-**Customizable AI prompts** — Override how notely classifies, structures, and merges notes by placing template files in your workspace's `templates/` directory. See [Customizing AI Prompts](docs/ARCHITECTURE.md#customizing-ai-behavior) for details.
+**Customizable AI prompts** — Override how notely classifies, structures, and merges notes by placing template files in your workspace's `templates/` directory. See [Customizing AI Prompts](docs/ARCHITECTURE.md#customizing-ai-prompts) for details.
 
 ## Workspace Structure
 
@@ -303,7 +345,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and PR guidelines. Se
 ```bash
 # Developer setup
 pip install -e ".[dev]"
-python -m pytest tests/ -v    # 170+ tests
+python -m pytest tests/ -v    # 240+ tests
 ```
 
 ## License
