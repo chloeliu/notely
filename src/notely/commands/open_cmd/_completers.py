@@ -861,12 +861,10 @@ class _TodoCommandCompleter(Completer):
         ("done", "Mark a todo as done"),
         ("delete", "Delete a todo permanently"),
         ("add", "Add a new todo"),
+        ("edit", "Edit todos: 'edit 1' or 'edit 1 2 3 due=tomorrow'"),
         ("today", "Flag items for today"),
-        ("due", "View sorted by due date"),
         ("timer", "Start timer on a todo"),
-        ("assign", "Change owner"),
         ("move", "Move to another folder"),
-        ("plan", "Pick today's focus"),
         ("show", "Filter by field=value"),
         ("filter", "Filter by field=value"),
         ("all", "Show everyone's todos"),
@@ -932,6 +930,27 @@ class _TodoCommandCompleter(Completer):
                 # Past folder word — show field completions
                 yield from self._yield_field_completions(parts[2] if len(parts) > 2 else "")
                 return
+        elif text_lower.startswith("edit "):
+            # After 'edit N [N2...] ' → field= completions for the instruction
+            after_edit = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+            # Skip past number tokens to find instruction part
+            tokens = after_edit.split()
+            past_numbers = False
+            instruction_part = ""
+            for j, tok in enumerate(tokens):
+                if tok.isdigit() or ("-" in tok and tok[0].isdigit()):
+                    continue
+                else:
+                    instruction_part = " ".join(tokens[j:])
+                    past_numbers = True
+                    break
+            if not past_numbers and after_edit.endswith(" ") and tokens:
+                # All tokens are numbers and there's a trailing space
+                past_numbers = True
+                instruction_part = ""
+            if past_numbers:
+                yield from self._yield_field_completions(instruction_part)
+            return
         elif text_lower.startswith(("show ", "filter ")):
             # After show/filter → suggest field= completions
             after = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""

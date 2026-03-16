@@ -130,7 +130,7 @@ def _todo_mode(
         label = "open" if show_all else "open for you"
         console.print(
             f"[dim]  {len(items_list)} {label} — "
-            "done · add · today · due · show · timer · assign · move · plan · all · q[/dim]"
+            "done · add · edit · today · show · timer · move · all · # to view · q[/dim]"
         )
 
     # Initial display — try your todos first
@@ -216,12 +216,13 @@ def _todo_mode(
             _todo_add(config, inline_args=cmd[4:].strip(), default_folder=initial_folder)
             _display(folder_filter=initial_folder)
 
+        elif cmd_lower.startswith("edit "):
+            _todo_edit(config, cmd[5:].strip(), num_to_id, items, completer)
+            _display(folder_filter=initial_folder)
+
         elif cmd_lower == "today":
             _todo_today(config, items, today_ids, num_to_id, today_str)
             _display(folder_filter=initial_folder)
-
-        elif cmd_lower == "due":
-            _todo_show_due(items, num_to_id, config)
 
         elif cmd_lower == "timer":
             _todo_timer(config, items, today_ids, num_to_id)
@@ -231,16 +232,8 @@ def _todo_mode(
             _todo_timer_direct(config, cmd[6:].strip(), num_to_id)
             _display(folder_filter=initial_folder)
 
-        elif cmd_lower == "plan":
-            _todo_plan(config, items, num_to_id, today_str)
-            _display(folder_filter=initial_folder)
-
         elif cmd_lower == "all":
             _display(show_all=True)
-
-        elif cmd_lower.startswith("assign "):
-            _todo_assign_direct(config, cmd[7:].strip(), num_to_id, items, completer)
-            _display(folder_filter=initial_folder)
 
         elif cmd_lower.startswith("move "):
             _todo_move_direct(config, cmd[5:].strip(), num_to_id, items, completer)
@@ -797,7 +790,7 @@ def _todo_item_actions(
     today_str: str,
     completer: "_SlashCompleter",
 ) -> None:
-    """Show quick actions for a numbered item: done, today, timer."""
+    """Show current record and actions for a numbered item."""
     item_id = _resolve_num_or_id(text, num_to_id)
     if item_id is None:
         console.print(f"[yellow]No item #{text}.[/yellow]")
@@ -812,16 +805,17 @@ def _todo_item_actions(
     folder = item.get("_folder_display", "")
     is_today = item_id in today_ids
 
-    console.print(f"\n  [bold]{task}[/bold]")
-    meta = []
-    if folder:
-        meta.append(folder)
+    # Show current record fields
+    console.print()
+    console.print(f"  [bold]task:[/bold] {task}")
+    if item.get("owner"):
+        console.print(f"  [bold]owner:[/bold] {item['owner']}")
     if item.get("due"):
-        meta.append(f"due {item['due']}")
+        console.print(f"  [bold]due:[/bold] {item['due']}")
+    if folder:
+        console.print(f"  [dim]folder: {folder}[/dim]")
     if is_today:
-        meta.append("★ today")
-    if meta:
-        console.print(f"  [dim]{' · '.join(meta)}[/dim]")
+        console.print(f"  [yellow]★ today[/yellow]")
 
     from ...timer import elapsed_since, get_running_timer_for_todo
     running = get_running_timer_for_todo(config, item_id)
@@ -829,14 +823,13 @@ def _todo_item_actions(
         console.print(f"  [green]⏱ Timer running: {elapsed_since(running['start'])}[/green]")
 
     # Build action prompt
-    actions = r"\[d]one / \[r]eassign / \[x] delete"
+    actions = r"\[e]dit / \[r]evise / \[d]one / \[x] delete"
     if not is_today:
         actions += r" / \[t]oday"
     if running:
         actions += r" / \[s]top timer"
     else:
         actions += r" / t\[i]mer"
-    actions += r" / Enter to cancel"
 
     from rich.prompt import Prompt
     try:
@@ -845,10 +838,12 @@ def _todo_item_actions(
         return
 
     choice = choice.strip().lower()
-    if choice == "d":
-        _do_mark_done(config, item_id, completer)
+    if choice == "e":
+        _do_edit_todo(config, item_id, item, completer)
     elif choice == "r":
-        _do_assign(config, item_id, task, completer)
+        _do_revise_todo(config, item_id, item, completer)
+    elif choice == "d":
+        _do_mark_done(config, item_id, completer)
     elif choice == "x":
         confirm = Prompt.ask(
             f"  [red]Delete this todo? This cannot be undone[/red]",
@@ -876,6 +871,336 @@ def _todo_item_actions(
         if stopped:
             mins = int(stopped.get("duration_minutes", 0))
             console.print(f"[green]⏱ Stopped:[/green] {format_duration(mins)}")
+
+
+def _todo_edit(
+    config: NotelyConfig,
+    text: str,
+    num_to_id: dict[int, int],
+    items: list[dict],
+    completer: "_SlashCompleter",
+) -> None:
+    """Edit one or more todos: 'edit 1', 'edit 1 2 3 due=tomorrow'."""
+    from rich.panel import Panel
+
+    from ...ai import parse_record_with_ai
+    from ...storage import sync_todo_index, update_todo_record
+
+    # Parse: numbers/ranges first, then instruction
+    tokens = text.split()
+    nums: list[int] = []
+    instruction_start = 0
+    for i, tok in enumerate(tokens):
+        if "-" in tok and tok[0].isdigit():
+            try:
+                lo, hi = tok.split("-", 1)
+                nums.extend(range(int(lo), int(hi) + 1))
+                instruction_start = i + 1
+            except ValueError:
+                break
+        elif tok.isdigit():
+            nums.append(int(tok))
+            instruction_start = i + 1
+        else:
+            break
+
+    if not nums:
+        console.print("[yellow]Usage: edit NUMBER [instruction][/yellow]")
+        return
+
+    instruction = " ".join(tokens[instruction_start:]).strip()
+
+    # Resolve items
+    resolved: list[tuple[int, int, dict]] = []
+    for n in nums:
+        item_id = num_to_id.get(n)
+        if item_id is None:
+            console.print(f"[yellow]No item #{n}.[/yellow]")
+            continue
+        item = next((it for it in items if it["id"] == item_id), None)
+        if item:
+            resolved.append((n, item_id, item))
+
+    if not resolved:
+        return
+
+    # Single item, no instruction → interactive edit
+    if len(resolved) == 1 and not instruction:
+        _, item_id, item = resolved[0]
+        _do_edit_todo(config, item_id, item, completer)
+        return
+
+    # Prompt for instruction if missing
+    if not instruction:
+        try:
+            instruction = PromptSession().prompt("  What to change: ")
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not instruction.strip():
+            return
+
+    # Build context for AI: all items + instruction
+    items_context = []
+    for n, _, it in resolved:
+        parts = [f"#{n}: task={it['task']}"]
+        if it.get("owner"):
+            parts.append(f"owner={it['owner']}")
+        if it.get("due"):
+            parts.append(f"due={it['due']}")
+        items_context.append(" ".join(parts))
+
+    ai_input = "Items:\n" + "\n".join(items_context) + f"\n\nInstruction: {instruction}"
+
+    console.print("[dim]Processing...[/dim]")
+    parsed = parse_record_with_ai(
+        ai_input, "todo", ["task", "owner", "due"],
+        db_description="Action items with owner and optional due date",
+        user_name=config.user_name or "",
+    )
+
+    if not parsed:
+        console.print("[yellow]Could not parse. Try again.[/yellow]")
+        return
+
+    # Preview what will change
+    changes = {k: v for k, v in parsed.items() if k in ("task", "owner", "due") and v}
+    if not changes:
+        console.print("[dim]No changes detected.[/dim]")
+        return
+
+    change_desc = ", ".join(f"{k}={v}" for k, v in changes.items())
+    item_nums = ", ".join(f"#{n}" for n, _, _ in resolved)
+    console.print(Panel(
+        f"[bold]Apply to {item_nums}:[/bold]\n{change_desc}",
+        title="Edit todos", border_style="green",
+    ))
+
+    from rich.prompt import Prompt
+    try:
+        confirm = Prompt.ask(
+            r"  \[Y]es, apply / \[n]o, cancel", choices=["y", "n"], default="y",
+        )
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if confirm != "y":
+        return
+
+    # Apply to all resolved items
+    with Database(config.db_path) as db:
+        db.initialize()
+        for n, item_id, it in resolved:
+            # For batch: skip task field unless only 1 item (task is per-item)
+            update_fields = {}
+            for k in ("owner", "due"):
+                if k in changes:
+                    update_fields[k] = changes[k]
+            # Only apply task change for single-item edits
+            if len(resolved) == 1 and "task" in changes:
+                update_fields["task"] = changes["task"]
+            if update_fields:
+                update_todo_record(config, db, item_id, update_fields)
+
+    console.print(f"[green]✓ Updated {len(resolved)} todo(s).[/green]")
+    completer.invalidate_todos()
+
+
+def _do_edit_todo(
+    config: NotelyConfig,
+    item_id: int,
+    item: dict,
+    completer: "_SlashCompleter",
+) -> None:
+    """Edit todo fields interactively — field picker loop."""
+    from ...storage import sync_todo_index, update_todo_record
+
+    fields_list = ["task", "owner", "due"]
+    current = {
+        "task": item.get("task", ""),
+        "owner": item.get("owner", ""),
+        "due": item.get("due") or "",
+    }
+
+    changed = False
+    while True:
+        console.print()
+        for i, k in enumerate(fields_list, 1):
+            console.print(f"  [bold]{i}.[/bold] {k} = {current[k]}")
+        try:
+            pick = PromptSession().prompt("\n  Edit field # (q to finish): ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        pick = pick.strip().lower()
+        if pick in ("q", ""):
+            break
+        try:
+            idx = int(pick) - 1
+            if 0 <= idx < len(fields_list):
+                key = fields_list[idx]
+                try:
+                    new_val = PromptSession().prompt(
+                        f"  {key} = ", default=current[key],
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                new_val = new_val.strip()
+                if new_val != current[key]:
+                    current[key] = new_val
+                    changed = True
+        except ValueError:
+            console.print("[yellow]Enter a number or q.[/yellow]")
+
+    if not changed:
+        return
+
+    # Apply changes
+    update_fields = {}
+    if current["task"] != item.get("task", ""):
+        update_fields["task"] = current["task"]
+    if current["owner"] != item.get("owner", ""):
+        update_fields["owner"] = current["owner"]
+    if current["due"] != (item.get("due") or ""):
+        update_fields["due"] = current["due"]
+
+    if update_fields:
+        with Database(config.db_path) as db:
+            db.initialize()
+            update_todo_record(config, db, item_id, update_fields)
+        console.print(f"[green]✓ Updated.[/green]")
+        completer.invalidate_todos()
+
+
+def _do_revise_todo(
+    config: NotelyConfig,
+    item_id: int,
+    item: dict,
+    completer: "_SlashCompleter",
+) -> None:
+    """Revise a todo with AI — user describes the change, AI produces updated fields."""
+    from rich.panel import Panel
+
+    from ...ai import parse_record_with_ai
+    from ...storage import sync_todo_index, update_todo_record
+
+    # Show current state as context
+    current_str = f"task={item['task']}"
+    if item.get("owner"):
+        current_str += f" owner={item['owner']}"
+    if item.get("due"):
+        current_str += f" due={item['due']}"
+
+    try:
+        instruction = PromptSession().prompt("  What to change: ")
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not instruction.strip():
+        return
+
+    # Build input: current record + instruction
+    ai_input = f"Current: {current_str}\nInstruction: {instruction}"
+
+    console.print("[dim]Revising...[/dim]")
+    parsed = parse_record_with_ai(
+        ai_input, "todo", ["task", "owner", "due"],
+        db_description="Action items with owner and optional due date",
+        user_name=config.user_name or "",
+    )
+
+    if not parsed:
+        console.print("[yellow]Could not revise. Try again.[/yellow]")
+        return
+
+    # Fill unchanged fields from current
+    if "task" not in parsed:
+        parsed["task"] = item["task"]
+    if "owner" not in parsed and item.get("owner"):
+        parsed["owner"] = item["owner"]
+    if "due" not in parsed and item.get("due"):
+        parsed["due"] = item["due"]
+
+    # Preview
+    lines = []
+    lines.append(f"[bold]task:[/bold] {parsed.get('task', '')}")
+    if parsed.get("owner"):
+        lines.append(f"[bold]owner:[/bold] {parsed['owner']}")
+    if parsed.get("due"):
+        lines.append(f"[bold]due:[/bold] {parsed['due']}")
+    console.print(Panel("\n".join(lines), title="Revised todo", border_style="green"))
+
+    from rich.prompt import Prompt
+    try:
+        confirm = Prompt.ask(
+            r"  \[Y]es, save / \[n]o, cancel", choices=["y", "n"], default="y",
+        )
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if confirm != "y":
+        return
+
+    with Database(config.db_path) as db:
+        db.initialize()
+        update_todo_record(config, db, item_id, parsed)
+
+    console.print(f"[green]✓ Updated.[/green]")
+    completer.invalidate_todos()
+
+
+def _todo_set_due(
+    config: NotelyConfig,
+    text: str,
+    num_to_id: dict[int, int],
+    items: list[dict],
+    completer: "_SlashCompleter",
+) -> None:
+    """Set due date on an item: 'due 4 friday' or 'due 4' (prompts for date)."""
+    from ...ai import parse_record_with_ai
+    from ...storage import sync_todo_index, update_todo_record
+
+    parts = text.split(None, 1)
+    if not parts:
+        console.print("[yellow]Usage: due NUMBER [DATE][/yellow]")
+        return
+
+    item_id = _resolve_num_or_id(parts[0], num_to_id)
+    if item_id is None:
+        console.print(f"[yellow]No item #{parts[0]}.[/yellow]")
+        return
+
+    item = next((i for i in items if i["id"] == item_id), None)
+    if item is None:
+        console.print(f"[yellow]No item #{parts[0]}.[/yellow]")
+        return
+
+    # Get date — from inline arg or prompt
+    if len(parts) >= 2:
+        date_text = parts[1].strip()
+    else:
+        try:
+            date_text = PromptSession().prompt(
+                f"  Due date for '{item['task']}': ",
+                default=item.get("due") or "",
+            )
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not date_text.strip():
+            return
+
+    # Parse with AI for natural language dates
+    parsed = parse_record_with_ai(
+        f"due={date_text}", "todo", ["task", "owner", "due"],
+        db_description="Action items with owner and optional due date",
+        user_name=config.user_name or "",
+    )
+
+    due_val = parsed.get("due", date_text)
+
+    with Database(config.db_path) as db:
+        db.initialize()
+        update_todo_record(config, db, item_id, {"due": due_val})
+
+    console.print(f"[green]✓ Due date set to {due_val}:[/green] {item['task']}")
+    completer.invalidate_todos()
 
 
 def _todo_assign_direct(

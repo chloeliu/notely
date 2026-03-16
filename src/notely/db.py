@@ -1165,6 +1165,45 @@ class Database:
         )
         self.conn.commit()
 
+    def update_todo_fields(
+        self, item_id: int,
+        task: str | None = None,
+        owner: str | None = None,
+        due: str | None = None,
+    ) -> None:
+        """Update a todo's task text, owner, and/or due date.
+
+        Only provided (non-None) fields are updated. Task updates the entity column,
+        owner/due update the value JSON.
+        """
+        row = self.conn.execute(
+            "SELECT entity, value FROM snippets WHERE id = ? AND snippet_type = 'todo'",
+            (item_id,),
+        ).fetchone()
+        if not row:
+            return
+
+        # Update entity (task text) if provided
+        if task is not None:
+            self.conn.execute(
+                "UPDATE snippets SET entity = ? WHERE id = ? AND snippet_type = 'todo'",
+                (task, item_id),
+            )
+
+        # Update value JSON (owner/due) if either provided
+        if owner is not None or due is not None:
+            value = safe_json_loads(row[1], default={})
+            if owner is not None:
+                value["owner"] = owner
+            if due is not None:
+                value["due"] = due
+            self.conn.execute(
+                "UPDATE snippets SET value = ? WHERE id = ? AND snippet_type = 'todo'",
+                (json.dumps(value), item_id),
+            )
+
+        self.conn.commit()
+
     def get_folder_for_todo(self, item_id: int) -> tuple[str, str, str] | None:
         """Get (space, group_slug, display) for the folder containing a todo.
 

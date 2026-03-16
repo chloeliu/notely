@@ -321,6 +321,30 @@ def update_action_owner(
     return row
 
 
+def update_todo_record(
+    config: NotelyConfig,
+    db: "Database",
+    item_id: int,
+    fields: dict[str, str],
+) -> dict[str, Any] | None:
+    """Update a todo's fields (task, owner, due) from a parsed dict.
+
+    Returns the updated todo row dict if found, None otherwise.
+    """
+    row = db.get_todo(item_id)
+    if not row:
+        return None
+
+    db.update_todo_fields(
+        item_id,
+        task=fields.get("task"),
+        owner=fields.get("owner"),
+        due=fields.get("due"),
+    )
+    sync_todo_index(config, db)
+    return db.get_todo(item_id)
+
+
 def merge_duplicate_todos(
     config: NotelyConfig,
     db: "Database",

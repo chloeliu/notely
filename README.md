@@ -127,25 +127,23 @@ notely-notetaker> [paste your meeting notes, Slack thread, anything]
 ### Managing todos
 
 ```
-notely-notetaker> /todo projects/acme
-
-  No open todos for chloe. 3 assigned to others.
-
 notely-todo (Acme)> add Schedule kickoff with Canvas Medical due=friday
 
-  Preview
-  ──────────────────────────────────
   Task:   Schedule kickoff with Canvas Medical
   Owner:  Chloe
   Due:    2026-03-20
-  Folder: projects/acme
-  ──────────────────────────────────
-
   [Y]es, save / [e]dit / [r]evise with AI / [n]o, skip: y
   Added.
+
+notely-todo (Acme)> edit 1 2 3 due=tomorrow
+
+  Apply to #1, #2, #3:
+  due=2026-03-16
+  [Y]es, apply / [n]o, cancel: y
+  Updated 3 todo(s).
 ```
 
-Type naturally or use `key=value` syntax — AI (Haiku) parses it. Tab completion shows available fields as hints.
+Type naturally or use `key=value` syntax — AI (Haiku) parses it. `edit` works on single items (interactive field picker) or batch (`edit 1 2 3 owner=jake`).
 
 ### Searching
 
@@ -275,7 +273,7 @@ Both paths produce the same markdown files and search index.
 
 | Command | What it does |
 |---------|-------------|
-| `/todo [folder]` | Interactive todo mode — AI-parsed add, mark done, flag for today, start timers |
+| `/todo [folder]` | Interactive todo mode — add, edit, done, batch edit (`edit 1 2 3 due=tomorrow`) |
 | `/search <folder\|query>` | Interactive search mode — hybrid FTS + semantic, keyword-highlighted snippets |
 | `/chat <folder>` | AI chat scoped to a folder's notes |
 | `/<db_name>` | Database interactive mode — AI-parsed add, update, delete, browse records |
