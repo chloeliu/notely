@@ -179,25 +179,25 @@ notely-chat (Acme)> what are the open items for Acme?
 
 ```mermaid
 flowchart TD
-    A["You paste raw text"] --> B{"AI classifies it<br/>and files it"}
-    B -->|"Structured content"| C["Full note<br/>(title, summary, tags,<br/>action items)"]
-    B -->|"Quick task or idea"| D["Todo or Idea<br/>(one-liner, due date)"]
-    B -->|"Reference data"| E["Database record<br/>(contact, NPI, account)"]
-    C --> F{"Duplicate?"}
-    F -->|"Match found"| G["Merge into<br/>existing note"]
-    F -->|"No match"| H["Route to folder"]
-    G --> I["Saved as Markdown"]
-    H --> I
-    D --> J["Saved to database"]
-    E --> J
+    A["You paste raw text"] --> B{"Duplicate?<br/>(hash + semantic search)"}
+    B -->|"Match found"| C["Merge into<br/>existing note"]
+    B -->|"No match"| D["Route to folder"]
+    D --> E{"AI classifies<br/>and structures"}
+    E -->|"Structured content"| F["Full note<br/>(title, summary, tags,<br/>action items + records)"]
+    E -->|"Quick task or idea"| G["Todo or Idea<br/>(one-liner, due date)"]
+    E -->|"Reference data"| H["Database record<br/>(contact, NPI, account)"]
+    C --> I["Saved as Markdown"]
+    F --> I
+    G --> J["Saved to database"]
+    H --> J
     I --> K["Indexed + searchable"]
     J --> K
 
-    style B fill:#e3f2fd,stroke:#1976d2
+    style E fill:#e3f2fd,stroke:#1976d2
     style I fill:#d4edda,stroke:#28a745,stroke-width:2px
 ```
 
-The AI decides what your input is and files it in the right place — you never have to. Meeting notes become structured notes with action items and database records extracted in the same call, filed into the right client folder. "Call dentist Friday" becomes a todo. An account number becomes a searchable database record. Duplicates are caught automatically before anything is saved.
+Duplicate detection runs first — three layers (exact hash, snippet hash, semantic search) catch re-pastes before any AI call. Then the AI classifies your input and structures it. Meeting notes become full notes with action items and database records extracted in one call. "Call dentist Friday" becomes a todo. An account number becomes a searchable database record.
 
 **Markdown files are the source of truth.** Everything else (search index, vectors, CSV exports) is derived and can be rebuilt with `notely reindex`. You can edit your notes by hand in any text editor — notely respects your changes.
 
@@ -205,19 +205,23 @@ The AI decides what your input is and files it in the right place — you never 
 
 ```mermaid
 flowchart LR
-    subgraph Source of Truth
+    subgraph "Source of Truth"
         MD["Markdown files<br/>notes/**/*.md"]
+        REC["Database records<br/>(todos, contacts, ...)"]
     end
-    subgraph Derived - rebuildable
+    subgraph "Derived — rebuildable"
         DB["SQLite + FTS5<br/>index.db"]
         VEC["LanceDB<br/>.vectors/"]
         CSV["CSV exports<br/>_todos.csv, _contacts.csv, ..."]
     end
 
-    MD --> DB --> VEC
+    MD --> DB
+    REC -.->|"lives in"| DB
+    DB --> VEC
     DB --> CSV
 
     style MD fill:#d4edda,stroke:#28a745,stroke-width:2px
+    style REC fill:#d4edda,stroke:#28a745,stroke-width:2px
     style DB fill:#fff3cd,stroke:#ffc107
     style VEC fill:#fff3cd,stroke:#ffc107
     style CSV fill:#fff3cd,stroke:#ffc107
