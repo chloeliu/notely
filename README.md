@@ -297,11 +297,15 @@ Both paths produce the same markdown files and search index.
 
 ## Key Features
 
-**Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste an account number or NPI and it stores a searchable database record. You never have to tell it which type — it figures it out.
+**Smart classification** — The AI decides what your input is. Paste meeting notes and it creates a structured note with title, summary, tags, and action items. Type "call dentist Friday" and it creates a todo. Paste a contact's phone number or NPI and it stores a searchable database record. You never have to tell it which type — it figures it out.
 
-**Databases** — Notely has a built-in lightweight database system for structured records. Todos, contacts, providers, plain facts — each is a "database" you can query, browse, and export. The AI extracts records inline when structuring notes (one call produces both the note and its todos/contacts). Type `/<name>` (e.g. `/contacts`, `/todo`) to enter interactive mode. Add records with natural language — `add Dr. Smith phone 555-1234, npi 1234567890` or use `key=value` syntax. AI (Haiku) parses free-form input into structured fields with date conversion and field mapping. Create new databases on the fly — just paste data and notely walks you through setup. Each database gets its own CSV export and full-text search.
+**Duplicate detection** — Three layers before any AI call. First, an exact hash catches identical re-pastes. Second, a snippet hash (first 300 chars) catches the same content with minor edits. Third, semantic search finds notes that are similar but worded differently. If a match is found, notely offers to merge the new information into the existing note instead of creating a duplicate.
 
-**Duplicate detection** — Three layers: exact hash, snippet hash, and semantic search. Notely won't let you save the same meeting notes twice. If it finds a match, it offers to merge the new information in.
+**Search and chat** — `/search` does hybrid full-text + semantic search with keyword-highlighted snippets. Scope to a folder or search globally. `/chat <folder>` enters a conversational AI mode — ask questions about your notes and get answers grounded in what you've actually captured.
+
+**Databases** — Built-in lightweight database system for structured records. Todos, contacts, providers, plain facts — each is a "database" you can query, browse, and export. The AI extracts records inline when structuring notes (one call produces both the note and its todos/contacts). Type `/<name>` (e.g. `/contacts`, `/todo`) to enter interactive mode. Add records with natural language — `add Dr. Smith phone=555-1234 npi=1234567890` or use `key=value` syntax. AI (Haiku) parses free-form input into structured fields with date conversion and field mapping. Create new databases on the fly — just paste data and notely walks you through setup. Each database gets its own CSV export and full-text search.
+
+**Folder routing** — Similarity-based routing figures out where each note belongs. Vector search matches your input against existing folders and notes, then you confirm. At any routing prompt, you can type a folder path directly (e.g. `clients/acme`) instead of picking a number — notely resolves it or creates the folder on the spot.
 
 **Secret masking** — Wrap sensitive data in `|||secret|||` markers. The values are replaced with `[REDACTED]` before any text is sent to the AI. Secrets are stored in `.secrets.toml` — a local file, completely separate from the database system. Your secrets never leave your machine.
 
@@ -312,8 +316,6 @@ Saved to:    .secrets.toml → [pypi] api_token = "pypi-AgEIcHl..."
 ```
 
 Retrieve secrets with `/secret` inside `notely open` — tab-completes service and key names, only shows values when you specify both.
-
-**Folder routing** — AI figures out where each note belongs based on your workspace structure. At any routing prompt, you can type a folder path directly (e.g. `clients/acme`) instead of picking a number — notely resolves it or creates the folder on the spot.
 
 **Web clipping** — `/clip <url>` saves any web page as a structured note. Requires the optional Firecrawl dependency (`pip install "notely[web]"`) and a [Firecrawl API key](https://firecrawl.dev).
 
