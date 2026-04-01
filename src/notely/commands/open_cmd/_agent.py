@@ -38,6 +38,8 @@ def _agent_dispatch(config: NotelyConfig, arg: str, working_folder: dict | None 
         _agent_connect(config, rest)
     elif subcmd == "disconnect":
         _agent_disconnect(config, rest)
+    elif subcmd == "status":
+        _agent_status()
     elif not subcmd:
         _agent_help(config)
     else:
@@ -52,6 +54,7 @@ def _agent_help(config: NotelyConfig) -> None:
     console.print("  [cyan]/agent run[/cyan] [dim]FOLDER request[/dim]   One-shot agent action")
     console.print("  [cyan]/agent connect[/cyan] [dim]\\[FOLDER][/dim]   Connect services")
     console.print("  [cyan]/agent disconnect[/cyan] [dim]FOLDER SERVICE[/dim]  Remove a service")
+    console.print("  [cyan]/agent status[/cyan]                  Show connected accounts & services")
     console.print()
 
     # Show connected services overview
@@ -71,6 +74,41 @@ def _agent_help(config: NotelyConfig) -> None:
         console.print("[dim]notely-agent not installed. Install: pip install -e path/to/notely-agent[/dim]")
     except Exception:
         console.print("[dim]Could not load agent config.[/dim]")
+
+
+def _agent_status() -> None:
+    """Show detailed status of all connected accounts and services."""
+    try:
+        from notely_agent.api import list_connections
+    except ImportError:
+        console.print("[yellow]notely-agent not installed.[/yellow]")
+        console.print("[dim]Install: pip install -e path/to/notely-agent[/dim]")
+        return
+
+    connections = list_connections()
+    if not connections:
+        console.print("[dim]No accounts configured. Run /agent connect to set up.[/dim]")
+        return
+
+    console.print("[bold]Connected Accounts[/bold]\n")
+    for conn in connections:
+        name = conn["account"]
+        services = conn["services"]
+        folders = conn["folders"]
+        is_default = conn["default"]
+
+        label = f"[bold cyan]{name}[/bold cyan]"
+        if is_default:
+            label += " [dim](default)[/dim]"
+
+        scope = ", ".join(folders) if folders else "all folders"
+        console.print(f"  {label}")
+        console.print(f"    Scope:    {scope}")
+        if services:
+            console.print(f"    Services: {', '.join(services)}")
+        else:
+            console.print("    Services: [dim]none connected[/dim]")
+        console.print()
 
 
 def _agent_chat(config: NotelyConfig, arg: str) -> None:

@@ -879,9 +879,11 @@ def _handle_workflow(config: NotelyConfig, arg: str) -> None:
     subcmd = parts[0].lower() if parts else ""
 
     if not subcmd:
-        console.print(
-            "[dim]Usage: /workflow create | /workflow pull [dim]\\[NAME][/dim] | /workflow list[/dim]"
-        )
+        from ._workflow_mode import _workflow_mode
+        try:
+            _workflow_mode(config)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Back to notely.[/dim]")
         return
 
     try:

@@ -2040,6 +2040,19 @@ class Database:
         except sqlite3.OperationalError:
             return 0
 
+    def get_inbox_last_run(self) -> dict[str, str]:
+        """Get the most recent inbox item timestamp per source.
+
+        Returns dict mapping source name → ISO timestamp of latest item.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT source, MAX(created) as last_run FROM inbox GROUP BY source",
+            ).fetchall()
+            return {r["source"]: r["last_run"] for r in rows}
+        except sqlite3.OperationalError:
+            return {}
+
     def cleanup_inbox(self, days: int = 30) -> int:
         """Delete filed/skipped inbox items older than N days. Returns count deleted."""
         from datetime import datetime, timedelta, timezone

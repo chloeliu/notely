@@ -32,9 +32,9 @@ HELP_TEXT = """
   [cyan]/agent disconnect FOLDER SERVICE[/cyan] Remove a service
 
 [bold]Workflows & Inbox:[/bold]
-  [cyan]/workflow create[/cyan]  Create a new workflow with AI assistance
-  [cyan]/workflow pull[/cyan]    Pull from all workflows ([cyan]/workflow pull NAME[/cyan] for one)
-  [cyan]/workflow list[/cyan]    Show available workflows
+  [cyan]/workflow[/cyan]          Interactive workflow mode (create, pull, list)
+  [cyan]/workflow create[/cyan]   Create a new workflow
+  [cyan]/workflow pull[/cyan]     Run all workflows → inbox
   [cyan]/inbox[/cyan]            Review pending inbox items
   [cyan]/inbox count[/cyan]      Show inbox count
   [cyan]/inbox history[/cyan]    Recently filed items

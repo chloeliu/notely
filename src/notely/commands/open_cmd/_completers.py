@@ -568,6 +568,7 @@ class _SlashCompleter(Completer):
                 ("run", "one-shot agent action"),
                 ("connect", "connect services"),
                 ("disconnect", "remove a service"),
+                ("status", "show connected accounts & services"),
             ]
 
             # Phase 0: first word → subcommands (+ folder names for backwards compat)
@@ -1013,6 +1014,66 @@ class _TodoCommandCompleter(Completer):
                     start_position=-len(text),
                     display_meta=desc,
                 )
+
+
+class _WorkflowCommandCompleter(Completer):
+    """Tab completion for workflow mode commands + workflow names."""
+
+    _COMMANDS = [
+        ("create", "Create a new workflow with AI"),
+        ("pull", "Run workflows, deposit results to inbox"),
+        ("list", "Show available workflows"),
+        ("status", "Status and last run times"),
+        ("show", "View workflow details and prompt"),
+        ("edit", "Open workflow YAML in $EDITOR"),
+        ("delete", "Delete a workflow"),
+        ("schedule", "Set schedule (e.g. 'every 6h', or 'off')"),
+        ("refresh", "Reload list"),
+        ("q", "Exit workflow mode"),
+    ]
+
+    # Commands that take a workflow name as argument
+    _NAME_COMMANDS = {"pull", "show", "edit", "delete", "schedule"}
+
+    def __init__(self) -> None:
+        self._workflow_cache: list[dict] | None = None
+
+    def _get_workflows(self) -> list[dict]:
+        if self._workflow_cache is None:
+            try:
+                from notely_agent.api import workflow_list
+                self._workflow_cache = workflow_list()
+            except Exception:
+                self._workflow_cache = []
+        return self._workflow_cache
+
+    def invalidate(self) -> None:
+        self._workflow_cache = None
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        stripped = text.strip()
+
+        if " " not in stripped:
+            # First word — suggest commands
+            partial = stripped.lower()
+            for cmd, hint in self._COMMANDS:
+                if cmd.startswith(partial):
+                    yield Completion(cmd, start_position=-len(stripped), display_meta=hint)
+        else:
+            # After first word — workflow names for commands that take them
+            words = stripped.split(None, 1)
+            if words[0].lower() in self._NAME_COMMANDS:
+                rest = words[1] if len(words) > 1 else ""
+                partial = rest.strip().lower()
+                for wf in self._get_workflows():
+                    name = wf["name"]
+                    if not partial or partial in name.lower():
+                        yield Completion(
+                            name,
+                            start_position=-len(rest),
+                            display_meta=wf.get("description", ""),
+                        )
 
 
 class _AddFieldCompleter(Completer):
